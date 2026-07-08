@@ -99,6 +99,7 @@ const state = {
   likedVideos: [],
   ratings: {},
   subscriptionIdsByChannel: {},
+  channelThumbnailsById: {},
   savedIds: new Set(readJson("yt_saved_ids", [])),
   localHistory: readJson("yt_history", []),
   searchHistory: readJson("yt_search_history", []),
@@ -739,7 +740,8 @@ async function loadLikedVideoSeeds() {
       myRating: "like",
       maxResults: 25,
     }, { auth: true });
-    return (payload.items || []).map(normalizeVideoResource);
+    const videos = (payload.items || []).map(normalizeVideoResource);
+    return hydrateVideoChannelThumbnails(videos);
   } catch {
     return [];
   }
@@ -753,7 +755,8 @@ async function loadPopularVideos(options = {}) {
       regionCode: state.config.regionCode,
       maxResults: 25,
     }, options);
-    return (payload.items || []).map(normalizeVideoResource);
+    const videos = (payload.items || []).map(normalizeVideoResource);
+    return hydrateVideoChannelThumbnails(videos);
   } catch {
     return [];
   }
@@ -949,7 +952,9 @@ async function loadChannels(channelIds) {
     maxResults: 50,
   }, { auth: Boolean(state.auth.accessToken) })));
 
-  return responses.flatMap((payload) => payload.items || []).map(normalizeChannelResource);
+  const channels = responses.flatMap((payload) => payload.items || []).map(normalizeChannelResource);
+  cacheChannelThumbnails(channels);
+  return channels;
 }
 
 async function loadVideoDetails(videoIds, options = {}) {
@@ -960,7 +965,8 @@ async function loadVideoDetails(videoIds, options = {}) {
     maxResults: 50,
   }, options)));
 
-  return responses.flatMap((payload) => payload.items || []).map(normalizeVideoResource);
+  const videos = responses.flatMap((payload) => payload.items || []).map(normalizeVideoResource);
+  return hydrateVideoChannelThumbnails(videos);
 }
 
 async function runSearch(query) {
@@ -1054,8 +1060,8 @@ async function loadLikedVideos() {
       myRating: "like",
       maxResults: 25,
     }, { auth: true });
-    state.likedVideos = (payload.items || [])
-      .map(normalizeVideoResource)
+    state.likedVideos = (await hydrateVideoChannelThumbnails((payload.items || [])
+      .map(normalizeVideoResource)))
       .filter((video) => !isLikelyShort(video));
     render();
   } catch (error) {
@@ -1149,6 +1155,7 @@ function normalizeVideoResource(item) {
     channelId: snippet.channelId || "",
     channelTitle: snippet.channelTitle || "YouTube",
     thumbnailUrl: bestThumbnail(snippet.thumbnails),
+    channelThumbnailUrl: state.channelThumbnailsById[snippet.channelId] || "",
     publishedAt: snippet.publishedAt || "",
     duration: formatDuration(item.contentDetails?.duration),
     durationSeconds,
@@ -1170,6 +1177,34 @@ function normalizeChannelResource(item) {
     thumbnailUrl: bestThumbnail(snippet.thumbnails),
     uploadsPlaylistId: item.contentDetails?.relatedPlaylists?.uploads || "",
   };
+}
+
+function cacheChannelThumbnails(channels = []) {
+  channels.forEach((channel) => {
+    if (channel.id && channel.thumbnailUrl) {
+      state.channelThumbnailsById[channel.id] = channel.thumbnailUrl;
+    }
+  });
+}
+
+async function hydrateVideoChannelThumbnails(videos = []) {
+  const missingChannelIds = [...new Set(videos
+    .map((video) => video.channelId)
+    .filter((channelId) => channelId && !state.channelThumbnailsById[channelId]))];
+
+  if (missingChannelIds.length) {
+    try {
+      await loadChannels(missingChannelIds);
+    } catch {
+      // Channel avatars are nice-to-have; keep the video list usable if this fails.
+    }
+  }
+
+  videos.forEach((video) => {
+    video.channelThumbnailUrl = video.channelThumbnailUrl || state.channelThumbnailsById[video.channelId] || "";
+  });
+
+  return videos;
 }
 
 function bestThumbnail(thumbnails = {}) {
@@ -1736,7 +1771,7 @@ function renderWatch() {
         </div>
         <p class="stats-line">${escapeHtml([video.viewCount ? `${video.viewCount} views` : "", timeAgo(video.publishedAt)].filter(Boolean).join(" • "))}</p>
         <div class="channel-row">
-          <img class="channel-avatar large" src="${escapeHtml(channelAvatarFor(video))}" alt="" />
+          ${renderChannelAvatar(video, "large")}
           <div>
             <strong>${escapeHtml(video.channelTitle)}</strong>
             <span>${subscribed ? "Subscribed" : "Channel"}</span>
@@ -1917,7 +1952,7 @@ function renderVideoRow(video, source) {
         ${video.duration ? `<span class="duration">${escapeHtml(video.duration)}</span>` : ""}
       </button>
       <button class="video-copy" type="button" data-action="watch" data-video-id="${escapeHtml(video.id)}" data-source="${escapeHtml(source)}">
-        <img class="channel-avatar" src="${escapeHtml(channelAvatarFor(video))}" alt="" loading="lazy" />
+        ${renderChannelAvatar(video)}
         <span>
           <strong>${escapeHtml(video.title)}</strong>
           <small>${escapeHtml(videoMeta(video))}</small>
@@ -1929,7 +1964,22 @@ function renderVideoRow(video, source) {
 }
 
 function channelAvatarFor(video) {
-  return `https://i.ytimg.com/vi/${encodeURIComponent(video.id)}/default.jpg`;
+  return video.channelThumbnailUrl || state.channelThumbnailsById[video.channelId] || "";
+}
+
+function renderChannelAvatar(video, size = "") {
+  const className = `channel-avatar${size ? ` ${size}` : ""}`;
+  const avatarUrl = channelAvatarFor(video);
+
+  if (avatarUrl) {
+    return `<img class="${className}" src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />`;
+  }
+
+  return `<span class="${className} fallback" aria-hidden="true">${escapeHtml(channelInitial(video.channelTitle))}</span>`;
+}
+
+function channelInitial(title = "") {
+  return (String(title).trim().charAt(0) || "S").toUpperCase();
 }
 
 function renderBottomNav() {
