@@ -6,6 +6,20 @@ Mobile-first YouTube-watching PWA for iPhone/Safari.
 
 https://personal-youtube-app.vercel.app
 
+## GitHub Repo
+
+https://github.com/thatsimaguy/simatube
+
+To continue on another computer, sign in to GitHub as `thatsimaguy`, then clone:
+
+```bash
+git clone https://github.com/thatsimaguy/simatube.git
+cd simatube
+npm run build
+```
+
+Vercel is connected to this GitHub repo. Pushing to `main` can update the live Vercel project.
+
 ## Local Commands
 
 ```bash
