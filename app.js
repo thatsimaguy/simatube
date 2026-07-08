@@ -1621,7 +1621,7 @@ function renderHome() {
       ${state.demoMode && !personalized ? renderDemoPill() : ""}
       ${state.reconnectFailed && state.rememberSignIn && !personalized ? renderReconnectPill() : ""}
       <div class="chip-row" aria-label="Home filters">
-        ${filterChip("all", personalized ? "For you" : "Popular")}
+        ${filterChip("all", personalized ? "Hello" : "Popular")}
         ${filterChip("today", "Today")}
         ${filterChip("saved", "Saved")}
         ${filterChip("history", "History")}
