@@ -166,6 +166,7 @@ function boot() {
   state.homeFeed = state.demoMode ? demoVideos : [];
   state.queue = state.homeFeed;
   render();
+  setupPortraitOrientationLock();
 
   restoreServerSession().then((restored) => {
     if (restored) {
@@ -186,6 +187,25 @@ function boot() {
       loadPopularHome();
     }
   });
+}
+
+function setupPortraitOrientationLock() {
+  tryLockPortraitOrientation();
+  window.addEventListener("resize", tryLockPortraitOrientation);
+  window.addEventListener("orientationchange", tryLockPortraitOrientation);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      tryLockPortraitOrientation();
+    }
+  });
+}
+
+function tryLockPortraitOrientation() {
+  try {
+    screen.orientation?.lock?.("portrait")?.catch?.(() => {});
+  } catch {
+    // Normal browser tabs can reject orientation locks; the CSS blocker handles that case.
+  }
 }
 
 async function restoreServerSession() {
@@ -2235,6 +2255,8 @@ function queueForSource(source) {
 }
 
 app.addEventListener("click", async (event) => {
+  tryLockPortraitOrientation();
+
   if (handlePlayerFullscreenWakeTap(event)) {
     return;
   }
