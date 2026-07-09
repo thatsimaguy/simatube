@@ -808,6 +808,31 @@ svg {
   background: #000;
 }
 
+@media (orientation: portrait) {
+  html.player-fullscreen-open .player-shell.app-fullscreen #playerMount,
+  html.player-fullscreen-open .player-shell.app-fullscreen .poster-button,
+  html.player-fullscreen-open .player-shell.app-fullscreen .player-fallback {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    right: auto;
+    bottom: auto;
+    width: 100vh;
+    height: 100vw;
+    transform: rotate(90deg);
+    transform-origin: top left;
+  }
+
+  @supports (width: 100dvh) {
+    html.player-fullscreen-open .player-shell.app-fullscreen #playerMount,
+    html.player-fullscreen-open .player-shell.app-fullscreen .poster-button,
+    html.player-fullscreen-open .player-shell.app-fullscreen .player-fallback {
+      width: 100dvh;
+      height: 100dvw;
+    }
+  }
+}
+
 #playerMount,
 #playerMount iframe,
 .poster-button,
