@@ -140,7 +140,6 @@ label:focus-visible {
 .setup-status,
 .comment,
 .search-box,
-.rail-head,
 .channel-hero-top,
 .channel-identity,
 .channel-actions,
@@ -634,22 +633,6 @@ label:focus-visible {
   cursor: pointer;
 }
 
-.channel-rail {
-  padding: 4px 0 2px;
-}
-
-.rail-head {
-  justify-content: space-between;
-  padding: 0 12px 4px;
-}
-
-.rail-head h2 {
-  margin: 0;
-  font-size: 15px;
-  line-height: 20px;
-  font-weight: 800;
-}
-
 .feed-loader {
   min-height: 52svh;
   display: grid;
@@ -787,6 +770,34 @@ label:focus-visible {
   color: var(--muted);
   font-size: 14px;
   line-height: 20px;
+}
+
+.empty-panel {
+  display: grid;
+  gap: 10px;
+  margin: 18px 12px;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, .025));
+  text-align: center;
+}
+
+.empty-panel h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 23px;
+}
+
+.empty-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.empty-panel .primary-button {
+  justify-self: center;
 }
 
 .video-list {
@@ -1749,11 +1760,6 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   color: var(--muted);
   font-size: 11px;
   text-align: center;
-}
-
-.channel-strip.compact {
-  padding-top: 6px;
-  padding-bottom: 10px;
 }
 
 .channel-view {

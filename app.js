@@ -717,7 +717,13 @@ async function loadSubscriptionsAndFeed(options = {}) {
     });
 
     const channelIds = subs.map((sub) => sub.snippet?.resourceId?.channelId).filter(Boolean);
-    const channels = await loadChannels(channelIds);
+    let channels = [];
+    try {
+      channels = await loadChannels(channelIds);
+    } catch {
+      channels = subs.map(normalizeSubscriptionChannel).filter(Boolean);
+      cacheChannels(channels);
+    }
     state.subscriptions = channels;
 
     const uploadsPerChannel = Math.max(state.config.uploadsPerChannel, 5);
@@ -737,12 +743,19 @@ async function loadSubscriptionsAndFeed(options = {}) {
       .filter(Boolean);
 
     const uniqueVideoIds = [...new Set(uploadVideoIds)];
-    const subscribedVideos = await loadVideoDetails(uniqueVideoIds, { auth: true });
+    let subscribedVideos = [];
+    try {
+      subscribedVideos = await loadVideoDetails(uniqueVideoIds, { auth: true });
+    } catch {
+      subscribedVideos = [];
+    }
     state.subscriptionVideos = subscribedVideos.filter((video) => !isLikelyShort(video));
-    const feed = await buildPersonalHomeFeed(subscribedVideos);
+    const feed = await buildPersonalHomeFeed(state.subscriptionVideos);
 
-    state.homeFeed = feed.length ? feed : subscribedVideos.filter((video) => !isLikelyShort(video));
-    state.queue = state.homeFeed;
+    state.homeFeed = feed.length ? feed : state.subscriptionVideos;
+    if (state.homeFeed.length) {
+      state.queue = state.homeFeed;
+    }
     state.error = "";
   } catch (error) {
     state.error = error.message;
@@ -761,10 +774,12 @@ async function buildPersonalHomeFeed(subscribedVideos = []) {
     state.likedVideos = likedVideos;
   }
 
-  const [discoveryVideos, popularVideos] = await Promise.all([
+  const [discoveryResult, popularResult] = await Promise.allSettled([
     loadInterestDiscoveryVideos(),
     loadPopularVideos({ auth: true }),
   ]);
+  const discoveryVideos = discoveryResult.status === "fulfilled" ? discoveryResult.value : [];
+  const popularVideos = popularResult.status === "fulfilled" ? popularResult.value : [];
 
   const candidates = [
     ...subscribedVideos.map((video) => ({ video, source: "subscription" })),
@@ -1004,27 +1019,51 @@ function stableDailyJitter(id = "") {
 }
 
 async function loadChannels(channelIds) {
-  const chunks = chunk(channelIds, 50);
-  const responses = await Promise.all(chunks.map((ids) => youtubeFetch("/channels", {
+  const chunks = chunk([...new Set(channelIds.filter(Boolean))], 50);
+  if (!chunks.length) {
+    return [];
+  }
+
+  const responses = await Promise.allSettled(chunks.map((ids) => youtubeFetch("/channels", {
     part: "snippet,contentDetails,statistics",
     id: ids.join(","),
     maxResults: 50,
   }, { auth: Boolean(state.auth.accessToken) })));
+  const fulfilled = responses
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value);
 
-  const channels = responses.flatMap((payload) => payload.items || []).map(normalizeChannelResource);
+  if (!fulfilled.length) {
+    const firstError = responses.find((result) => result.status === "rejected")?.reason;
+    throw firstError instanceof Error ? firstError : new Error("Could not load channels.");
+  }
+
+  const channels = fulfilled.flatMap((payload) => payload.items || []).map(normalizeChannelResource);
   cacheChannels(channels);
   return channels;
 }
 
 async function loadVideoDetails(videoIds, options = {}) {
-  const chunks = chunk(videoIds, 50);
-  const responses = await Promise.all(chunks.map((ids) => youtubeFetch("/videos", {
+  const chunks = chunk([...new Set(videoIds.filter(Boolean))], 50);
+  if (!chunks.length) {
+    return [];
+  }
+
+  const responses = await Promise.allSettled(chunks.map((ids) => youtubeFetch("/videos", {
     part: "snippet,contentDetails,statistics",
     id: ids.join(","),
     maxResults: 50,
   }, options)));
+  const fulfilled = responses
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value);
 
-  const videos = responses.flatMap((payload) => payload.items || []).map(normalizeVideoResource);
+  if (!fulfilled.length) {
+    const firstError = responses.find((result) => result.status === "rejected")?.reason;
+    throw firstError instanceof Error ? firstError : new Error("Could not load videos.");
+  }
+
+  const videos = fulfilled.flatMap((payload) => payload.items || []).map(normalizeVideoResource);
   return hydrateVideoChannelThumbnails(videos);
 }
 
@@ -1323,6 +1362,29 @@ function normalizeChannelResource(item) {
     videoCountNumber: Number(stats.videoCount || 0),
     viewCount: formatCount(stats.viewCount),
     viewCountNumber: Number(stats.viewCount || 0),
+    publishedAt: snippet.publishedAt || "",
+  };
+}
+
+function normalizeSubscriptionChannel(item) {
+  const snippet = item.snippet || {};
+  const id = snippet.resourceId?.channelId || "";
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    title: snippet.title || "Channel",
+    description: snippet.description || "",
+    thumbnailUrl: bestThumbnail(snippet.thumbnails),
+    uploadsPlaylistId: "",
+    subscriberCount: "",
+    subscriberCountNumber: 0,
+    videoCount: "",
+    videoCountNumber: 0,
+    viewCount: "",
+    viewCountNumber: 0,
     publishedAt: snippet.publishedAt || "",
   };
 }
@@ -1907,7 +1969,6 @@ function renderHome() {
       ${renderInstallBanner()}
       ${state.demoMode && !personalized ? renderDemoPill() : ""}
       ${state.reconnectFailed && state.rememberSignIn && !personalized ? renderReconnectPill() : ""}
-      ${renderRecentChannelsRail()}
       <div class="chip-row" aria-label="Home filters">
         ${filterChip("all", personalized ? "For you" : "Popular")}
         ${filterChip("today", "New")}
@@ -1916,34 +1977,6 @@ function renderHome() {
         ${filterChip("history", "History")}
       </div>
       ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, "home")}
-    </section>
-  `;
-}
-
-function renderRecentChannelsRail() {
-  const fallbackChannels = state.subscriptions.length ? state.subscriptions.slice(0, 10) : demoChannels;
-  const channels = (state.recentChannels.length ? state.recentChannels : fallbackChannels)
-    .filter((channel) => channel?.id)
-    .slice(0, 10);
-
-  if (!channels.length) {
-    return "";
-  }
-
-  const title = state.recentChannels.length ? "Recent channels" : "Channels";
-  return `
-    <section class="channel-rail" aria-label="${escapeHtml(title)}">
-      <div class="rail-head">
-        <h2>${escapeHtml(title)}</h2>
-      </div>
-      <div class="channel-strip compact">
-        ${channels.map((channel) => `
-          <button class="channel-bubble" type="button" data-action="open-channel" data-channel-id="${escapeHtml(channel.id)}">
-            ${renderChannelImage(channel)}
-            <span>${escapeHtml(channel.title)}</span>
-          </button>
-        `).join("")}
-      </div>
     </section>
   `;
 }
@@ -2181,9 +2214,33 @@ function renderSubscriptions() {
           </button>
         `).join("")}
       </div>
-      ${renderVideoList(state.subscriptionVideos, "subscriptions")}
+      ${state.feedLoading ? renderFeedLoader() : renderSubscriptionContent()}
     </section>
   `;
+}
+
+function renderSubscriptionContent() {
+  if (!state.subscriptions.length) {
+    return `
+      <section class="empty-panel">
+        <h2>No subscriptions loaded.</h2>
+        <p>Refresh once YouTube finishes reconnecting your account.</p>
+        <button class="primary-button" type="button" data-action="refresh-subs">Refresh</button>
+      </section>
+    `;
+  }
+
+  if (!state.subscriptionVideos.length) {
+    return `
+      <section class="empty-panel">
+        <h2>Your channels loaded.</h2>
+        <p>Newest uploads did not come through yet. You can still open any channel above.</p>
+        <button class="primary-button" type="button" data-action="refresh-subs">Try again</button>
+      </section>
+    `;
+  }
+
+  return renderVideoList(state.subscriptionVideos, "subscriptions");
 }
 
 function renderChannel() {
@@ -2284,7 +2341,6 @@ function renderYou() {
         <button class="text-button" type="button" data-action="${profile ? "signout" : "signin"}">${profile ? "Sign out" : "Sign in"}</button>
       </section>
       ${state.config.youtubeApiKey && state.config.googleOAuthClientId ? "" : renderSetupStatus()}
-      ${renderRecentChannelsRail()}
       <section class="library-block">
         <div class="section-head">
           <h2>History</h2>
@@ -2336,14 +2392,19 @@ function renderHomeScreenCard() {
 }
 
 function renderVideoList(videos, source) {
-  if (!videos.length) {
+  const list = Array.isArray(videos) ? videos.filter(Boolean) : [];
+  if (!list.length) {
     return `<p class="empty-text">Nothing to show yet.</p>`;
   }
 
-  return `<div class="video-list">${videos.map((video) => renderVideoRow(video, source)).join("")}</div>`;
+  return `<div class="video-list">${list.map((video) => renderVideoRow(video, source)).join("")}</div>`;
 }
 
 function renderVideoRow(video, source) {
+  if (!video?.id) {
+    return "";
+  }
+
   const saved = state.savedIds.has(video.id);
   const watched = state.localHistory.some((item) => item.id === video.id);
   const reason = videoFeedReason(video, source);
