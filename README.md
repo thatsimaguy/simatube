@@ -23,9 +23,11 @@ Vercel is connected to this GitHub repo. Pushing to `main` can update the live V
 ## Local Commands
 
 ```bash
-npm run build
+npm run verify
 npm run deploy
 ```
+
+`npm run verify` checks the browser code and rebuilds the production `dist` folder.
 
 For a quick local server:
 

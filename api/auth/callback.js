@@ -1,5 +1,6 @@
 const {
   STATE_COOKIE,
+  appendSetCookie,
   clearAuthCookies,
   exchangeCode,
   getConfig,
@@ -38,7 +39,7 @@ module.exports = async function handler(req, res) {
     }
 
     setSessionCookie(req, res, config, session);
-    res.appendHeader?.("Set-Cookie", serializeCookie(req, STATE_COOKIE, "", { maxAge: 0 }));
+    appendSetCookie(res, serializeCookie(req, STATE_COOKIE, "", { maxAge: 0 }));
     redirect(res, "/?auth=server#home");
   } catch {
     clearAuthCookies(req, res);

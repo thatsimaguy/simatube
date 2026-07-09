@@ -1,6 +1,8 @@
 {
   "scripts": {
+    "check": "node --check app.js && node --check api/auth/_shared.js && node --check api/auth/start.js && node --check api/auth/callback.js && node --check api/auth/session.js && node --check api/auth/logout.js",
     "build": "node scripts/build-config.mjs",
+    "verify": "npm run check && npm run build",
     "deploy": "npx vercel deploy --prod --yes"
   }
 }

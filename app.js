@@ -7,6 +7,17 @@ const MAX_DISCOVERY_QUERIES = 4;
 const MAX_SUBSCRIPTION_UPLOAD_CHANNELS = 18;
 const MAX_SUBSCRIPTION_VIDEO_ROWS = 60;
 const PLAYLIST_FETCH_BATCH_SIZE = 4;
+const RECOVERY_SUBSCRIPTION_UPLOAD_CHANNELS = 8;
+const BOOT_STABLE_DELAY_MS = 15000;
+const REQUEST_TIMEOUT_MS = 20000;
+const CACHE_CLEANUP_VERSION = "2026-07-v2";
+const INITIAL_VIDEO_ROWS = 16;
+const VIDEO_ROWS_INCREMENT = 12;
+const MAX_VIDEO_CACHE_ENTRIES = 240;
+const MAX_CHANNEL_CACHE_ENTRIES = 120;
+const MAX_CHANNEL_VIDEO_CACHES = 12;
+const INITIAL_SUBSCRIPTION_CHANNELS = 16;
+const SUBSCRIPTION_CHANNEL_INCREMENT = 16;
 
 const demoVideos = [
   {
@@ -63,19 +74,19 @@ const demoChannels = [
   {
     id: "UC4QobU6STFB0P71PMvOGN5A",
     title: "jawed",
-    thumbnailUrl: "https://i.ytimg.com/vi/jNQXAC9IVRw/default.jpg",
+    thumbnailUrl: "",
     uploadsPlaylistId: "",
   },
   {
     id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
     title: "Google for Developers",
-    thumbnailUrl: "https://i.ytimg.com/vi/M7lc1UVf-VE/default.jpg",
+    thumbnailUrl: "",
     uploadsPlaylistId: "",
   },
   {
     id: "UCz75RVbH8q2jdBJ4SnwuZZQ",
     title: "Blender Foundation",
-    thumbnailUrl: "https://i.ytimg.com/vi/ScMzIvxBSi4/default.jpg",
+    thumbnailUrl: "",
     uploadsPlaylistId: "",
   },
 ];
@@ -83,17 +94,17 @@ const demoChannels = [
 const app = document.querySelector("#app");
 const sheetRoot = document.querySelector("#sheet-root");
 const toast = document.querySelector("#toast");
+const recoveringFromFastReload = beginBootGuard();
 
 const state = {
-  view: sanitizeView(readJson("yt_last_view", "home")),
+  view: recoveringFromFastReload ? "home" : sanitizeView(readJson("yt_last_view", "home")),
   auth: {
     accessToken: "",
     scopes: new Set(),
     profile: null,
   },
   config: normalizeConfig(window.YT_APP_CONFIG || {}),
-  configLocalLoaded: false,
-  activeVideoId: demoVideos[0].id,
+  activeVideoId: readString("yt_active_video_id", demoVideos[0].id),
   homeFeed: [],
   searchResults: [],
   subscriptions: [],
@@ -105,45 +116,69 @@ const state = {
   subscriptionIdsByChannel: {},
   channelThumbnailsById: {},
   feedReasonsById: {},
-  activeChannelId: readJson("yt_active_channel_id", ""),
+  activeChannelId: readString("yt_active_channel_id", ""),
   channelCacheById: Object.fromEntries(demoChannels.map((channel) => [channel.id, channel])),
   channelVideosById: Object.fromEntries(demoChannels.map((channel) => [
     channel.id,
     demoVideos.filter((video) => video.channelId === channel.id),
   ])),
+  videoCacheById: Object.fromEntries(demoVideos.map((video) => [video.id, video])),
   channelLoading: false,
+  channelLoadVersion: 0,
   channelSort: "latest",
-  recentChannels: readJson("yt_recent_channels", []),
-  savedIds: new Set(readJson("yt_saved_ids", [])),
-  localHistory: readJson("yt_history", []),
-  searchHistory: readJson("yt_search_history", []),
-  onboarded: readJson("yt_onboarded", false),
+  recentChannels: readArray("yt_recent_channels"),
+  savedIds: new Set(readArray("yt_saved_ids").filter((id) => typeof id === "string")),
+  localHistory: readArray("yt_history").filter((video) => video?.id),
+  searchHistory: readArray("yt_search_history").filter((query) => typeof query === "string"),
+  onboarded: readBoolean("yt_onboarded", false),
   fullscreenControlsTimer: 0,
   fullscreenControlsHidden: false,
-  installIntroDone: readJson("yt_install_intro_done", false),
-  rememberSignIn: readJson("yt_remember_youtube_signin", false),
+  installIntroDone: readBoolean("yt_install_intro_done", false),
+  rememberSignIn: readBoolean("yt_remember_youtube_signin", false),
   reconnectFailed: false,
-  demoMode: readJson("yt_demo_mode", false),
-  installDismissed: readJson("yt_install_dismissed", false),
+  demoMode: readBoolean("yt_demo_mode", false),
+  recoveryMode: recoveringFromFastReload,
   feedLoading: false,
+  subscriptionsLoaded: false,
+  subscriptionLoadPromise: null,
+  homeFeedLoaded: false,
+  homeFeedLoadPromise: null,
+  homeFeedLoadScheduled: false,
+  visibleRowsBySource: {},
+  visibleSubscriptionChannels: INITIAL_SUBSCRIPTION_CHANNELS,
   loading: "",
   error: "",
   query: "",
+  searchLoadVersion: 0,
+  commentsLoadVersion: 0,
+  authVersion: 0,
   homeFilter: "all",
   player: null,
+  playerVideoId: "",
   playerReady: false,
   playerError: null,
   ytApiReady: false,
 };
 
-if (!Array.isArray(state.recentChannels)) {
-  state.recentChannels = [];
-}
+cacheVideos(state.localHistory);
 
 await loadOptionalLocalConfig();
 state.config = normalizeConfig(window.YT_APP_CONFIG || {});
 boot();
 clearOldServiceWorkers();
+window.addEventListener("pagehide", (event) => {
+  clearPlayerFullscreenControlsTimer();
+  if (event.persisted) {
+    state.player?.pauseVideo?.();
+    return;
+  }
+  destroyPlayer();
+});
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted && state.view === "watch") {
+    mountPlayer(false);
+  }
+});
 
 function normalizeConfig(config) {
   return {
@@ -165,13 +200,15 @@ async function loadOptionalLocalConfig() {
 
     const code = await response.text();
     new Function(code)();
-    state.configLocalLoaded = true;
   } catch {
-    state.configLocalLoaded = false;
+    // Local configuration is optional; production uses the generated runtime config.
   }
 }
 
 function boot() {
+  if ("scrollRestoration" in history) {
+    history.scrollRestoration = "manual";
+  }
   window.onYouTubeIframeAPIReady = () => {
     state.ytApiReady = true;
     if (state.view === "watch") {
@@ -184,7 +221,9 @@ function boot() {
   state.homeFeed = state.demoMode ? demoVideos : [];
   state.queue = state.homeFeed;
   render();
+  window.requestAnimationFrame(resetScroll);
   setupPortraitOrientationLock();
+  window.setTimeout(markBootStable, BOOT_STABLE_DELAY_MS);
   if (state.view === "channel" && state.activeChannelId) {
     loadActiveChannel({ quiet: true });
   }
@@ -246,14 +285,16 @@ async function restoreServerSession() {
 
     applyServerSession(session);
     await loadMe();
-    await loadSubscriptionsAndFeed({ quiet: true });
     state.onboarded = true;
     state.demoMode = false;
     state.rememberSignIn = true;
     state.reconnectFailed = false;
+    state.feedLoading = false;
     writeJson("yt_onboarded", true);
     writeJson("yt_demo_mode", false);
     writeJson("yt_remember_youtube_signin", true);
+    render();
+    scheduleInitialPersonalLoad();
     showToast("Signed in.");
     return true;
   } catch {
@@ -266,7 +307,7 @@ async function restoreServerSession() {
 }
 
 async function fetchServerSession() {
-  const response = await fetch("/api/auth/session", {
+  const response = await fetchWithTimeout("/api/auth/session", {
     cache: "no-store",
     credentials: "same-origin",
   });
@@ -277,6 +318,20 @@ async function fetchServerSession() {
   }
 
   return payload;
+}
+
+async function fetchWithTimeout(input, options = {}, timeoutMs = 10000) {
+  if (!("AbortController" in window) || options.signal) {
+    return fetch(input, options);
+  }
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 function applyServerSession(session) {
@@ -313,7 +368,7 @@ async function clearServerSession() {
   }
 
   try {
-    await fetch("/api/auth/logout", {
+    await fetchWithTimeout("/api/auth/logout", {
       method: "POST",
       cache: "no-store",
       credentials: "same-origin",
@@ -360,12 +415,62 @@ function readJson(key, fallback) {
   }
 }
 
+function scheduleInitialPersonalLoad() {
+  const start = () => loadSubscriptionsAndFeed({
+    quiet: true,
+    includeHome: true,
+    conservative: state.recoveryMode,
+  });
+
+  if (state.recoveryMode) {
+    window.setTimeout(start, 1200);
+    return;
+  }
+
+  waitForIdleFrame().then(start);
+}
+
+function readArray(key) {
+  const value = readJson(key, []);
+  return Array.isArray(value) ? value : [];
+}
+
+function readBoolean(key, fallback = false) {
+  const value = readJson(key, fallback);
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readString(key, fallback = "") {
+  const value = readJson(key, fallback);
+  return typeof value === "string" ? value : fallback;
+}
+
 function writeJson(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {
     showToast("Local storage is unavailable.");
   }
+}
+
+function beginBootGuard() {
+  try {
+    const now = Date.now();
+    const previous = Number(sessionStorage.getItem("yt_boot_pending_at") || 0);
+    sessionStorage.setItem("yt_boot_pending_at", String(now));
+    return previous > 0 && now - previous < BOOT_STABLE_DELAY_MS * 2;
+  } catch {
+    return false;
+  }
+}
+
+function markBootStable() {
+  try {
+    sessionStorage.removeItem("yt_boot_pending_at");
+  } catch {
+    // Private browsing can make session storage unavailable.
+  }
+  state.recoveryMode = false;
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -392,6 +497,9 @@ async function clearOldServiceWorkers() {
   if (!("serviceWorker" in navigator) || location.protocol === "file:") {
     return;
   }
+  if (readString("yt_cache_cleanup_version") === CACHE_CLEANUP_VERSION) {
+    return;
+  }
 
   try {
     const registrations = await navigator.serviceWorker.getRegistrations();
@@ -400,6 +508,7 @@ async function clearOldServiceWorkers() {
       const keys = await caches.keys();
       await Promise.all(keys.map((key) => caches.delete(key)));
     }
+    writeJson("yt_cache_cleanup_version", CACHE_CLEANUP_VERSION);
   } catch {
     // Cache cleanup is best-effort; the app still works without it.
   }
@@ -511,7 +620,7 @@ async function youtubeFetch(path, params = {}, options = {}) {
     }
   });
 
-  const headers = {};
+  const headers = { ...(options.headers || {}) };
   if (useAuth && state.auth.accessToken) {
     headers.Authorization = `Bearer ${state.auth.accessToken}`;
   } else if (state.config.youtubeApiKey) {
@@ -520,10 +629,29 @@ async function youtubeFetch(path, params = {}, options = {}) {
     throw new Error("Add an API key or sign in first.");
   }
 
-  const response = await fetch(url, {
-    method: options.method || "GET",
-    headers,
-  });
+  const controller = !options.signal && "AbortController" in window ? new AbortController() : null;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS)
+    : 0;
+  let response;
+
+  try {
+    response = await fetch(url, {
+      method: options.method || "GET",
+      headers,
+      body: options.body,
+      signal: options.signal || controller?.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("YouTube took too long to respond. Try again.");
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  }
 
   if (response.status === 204) {
     return {};
@@ -559,7 +687,7 @@ async function listAll(path, params, options = {}, limit = 50) {
 }
 
 async function loadPopularHome() {
-  if (state.auth.accessToken) {
+  if (state.auth.accessToken || state.homeFeedLoaded || state.loading === "Loading Home") {
     return;
   }
 
@@ -570,11 +698,13 @@ async function loadPopularHome() {
     const rankedPopular = rankHomeCandidates(popularVideos.map((video) => ({ video, source: "popular" })));
     state.homeFeed = rankedPopular.length ? rankedPopular : demoVideos;
     state.queue = state.homeFeed;
+    state.homeFeedLoaded = true;
     state.error = "";
   } catch (error) {
     state.error = error.message;
     state.homeFeed = demoVideos;
     state.queue = demoVideos;
+    state.homeFeedLoaded = true;
   } finally {
     state.feedLoading = false;
     clearLoading();
@@ -601,6 +731,7 @@ async function signIn() {
     writeJson("yt_remember_youtube_signin", true);
     state.view = "home";
     writeJson("yt_last_view", "home");
+    resetScroll();
     showToast("Signed in.");
   } catch (error) {
     openSheet("Sign in did not finish", error.message, [{ label: "Close", action: closeSheet }]);
@@ -610,6 +741,10 @@ async function signIn() {
 }
 
 async function signOut() {
+  state.authVersion += 1;
+  state.searchLoadVersion += 1;
+  state.commentsLoadVersion += 1;
+  state.channelLoadVersion += 1;
   await clearServerSession();
   state.auth.accessToken = "";
   state.auth.scopes.clear();
@@ -618,8 +753,15 @@ async function signOut() {
   state.subscriptionVideos = [];
   state.subscriptionIdsByChannel = {};
   state.likedVideos = [];
+  state.subscriptionsLoaded = false;
+  state.homeFeedLoaded = false;
+  state.subscriptionLoadPromise = null;
+  state.homeFeedLoadPromise = null;
+  state.homeFeedLoadScheduled = false;
   state.rememberSignIn = false;
   state.reconnectFailed = false;
+  state.feedLoading = false;
+  state.loading = "";
   state.homeFeed = demoVideos;
   state.queue = demoVideos;
   state.view = "home";
@@ -627,6 +769,7 @@ async function signOut() {
   writeJson("yt_last_view", "home");
   showToast("Signed out.");
   render();
+  resetScroll();
 }
 
 function continueDemo() {
@@ -644,6 +787,7 @@ function continueDemo() {
   writeJson("yt_last_view", "home");
   showToast("Demo feed ready.");
   render();
+  resetScroll();
 }
 
 async function restoreSignIn() {
@@ -698,8 +842,49 @@ async function loadMe() {
   };
 }
 
-async function loadSubscriptionsAndFeed(options = {}) {
+function loadSubscriptionsAndFeed(options = {}) {
+  if (state.subscriptionLoadPromise) {
+    return state.subscriptionLoadPromise;
+  }
+
+  const authVersion = state.authVersion;
+  const request = performSubscriptionLoad(options)
+    .catch((error) => {
+      if (authVersion !== state.authVersion) {
+        return false;
+      }
+      state.feedLoading = false;
+      state.loading = "";
+      state.error = error.message;
+      if (!options.quiet) {
+        openSheet("Could not load subscriptions", error.message, [{ label: "Close", action: closeSheet }]);
+      }
+      render();
+      return false;
+    })
+    .then((loaded) => {
+      if (loaded && options.includeHome !== false) {
+        scheduleHomeFeedEnrichment({ refresh: options.refresh });
+      }
+      return loaded;
+    })
+    .finally(() => {
+      if (state.subscriptionLoadPromise === request) {
+        state.subscriptionLoadPromise = null;
+      }
+    });
+
+  state.subscriptionLoadPromise = request;
+  return request;
+}
+
+async function performSubscriptionLoad(options = {}) {
+  const authVersion = state.authVersion;
   await ensureReadAuth(options.authOptions || {});
+  if (authVersion !== state.authVersion || !state.auth.accessToken) {
+    return false;
+  }
+
   state.feedLoading = true;
   setLoading("Loading subscriptions");
 
@@ -710,6 +895,9 @@ async function loadSubscriptionsAndFeed(options = {}) {
       maxResults: 50,
       order: "unread",
     }, { auth: true }, state.config.maxSubscriptionChannels);
+    if (authVersion !== state.authVersion) {
+      return false;
+    }
 
     state.subscriptionIdsByChannel = {};
     subs.forEach((sub) => {
@@ -727,13 +915,25 @@ async function loadSubscriptionsAndFeed(options = {}) {
       channels = subs.map(normalizeSubscriptionChannel).filter(Boolean);
       cacheChannels(channels);
     }
+    if (authVersion !== state.authVersion) {
+      return false;
+    }
     state.subscriptions = channels;
 
-    const uploadsPerChannel = state.config.uploadsPerChannel;
+    const channelLimit = options.conservative
+      ? RECOVERY_SUBSCRIPTION_UPLOAD_CHANNELS
+      : MAX_SUBSCRIPTION_UPLOAD_CHANNELS;
     const uploadChannels = channels
       .filter((channel) => channel.uploadsPlaylistId)
-      .slice(0, MAX_SUBSCRIPTION_UPLOAD_CHANNELS);
-    const playlistResults = await loadSubscriptionPlaylistItems(uploadChannels, uploadsPerChannel);
+      .slice(0, channelLimit);
+    const playlistResults = await loadSubscriptionPlaylistItems(
+      uploadChannels,
+      state.config.uploadsPerChannel,
+      authVersion,
+    );
+    if (authVersion !== state.authVersion) {
+      return false;
+    }
 
     const uploadVideoIds = playlistResults
       .flatMap((result) => result.status === "fulfilled" ? result.value.items || [] : [])
@@ -743,35 +943,57 @@ async function loadSubscriptionsAndFeed(options = {}) {
     const uniqueVideoIds = [...new Set(uploadVideoIds)].slice(0, MAX_SUBSCRIPTION_VIDEO_ROWS);
     let subscribedVideos = [];
     try {
-      subscribedVideos = await loadVideoDetails(uniqueVideoIds, { auth: true });
+      subscribedVideos = await loadVideoDetails(uniqueVideoIds, { auth: true, refresh: options.refresh });
     } catch {
       subscribedVideos = [];
     }
+    if (authVersion !== state.authVersion) {
+      return false;
+    }
+
     state.subscriptionVideos = subscribedVideos
       .filter((video) => !isLikelyShort(video))
       .slice(0, MAX_SUBSCRIPTION_VIDEO_ROWS);
-    const feed = await buildPersonalHomeFeed(state.subscriptionVideos);
+    state.subscriptionsLoaded = true;
+    cacheVideos(state.subscriptionVideos);
 
-    state.homeFeed = feed.length ? feed : state.subscriptionVideos;
-    if (state.homeFeed.length) {
-      state.queue = state.homeFeed;
+    if (!state.homeFeed.length && state.subscriptionVideos.length) {
+      state.homeFeed = state.subscriptionVideos.slice(0, 40);
+      state.feedReasonsById = Object.fromEntries(
+        state.homeFeed.map((video) => [video.id, "From your channels"]),
+      );
+      if (state.view === "home" || !state.queue.length) {
+        state.queue = state.homeFeed;
+      }
     }
+
     state.error = "";
+    markBootStable();
+    return true;
   } catch (error) {
+    if (authVersion !== state.authVersion) {
+      return false;
+    }
     state.error = error.message;
     if (!options.quiet) {
       openSheet("Could not load subscriptions", error.message, [{ label: "Close", action: closeSheet }]);
     }
+    return false;
   } finally {
-    state.feedLoading = false;
-    clearLoading();
+    if (authVersion === state.authVersion) {
+      state.feedLoading = false;
+      clearLoading();
+    }
   }
 }
 
-async function loadSubscriptionPlaylistItems(channels, uploadsPerChannel) {
+async function loadSubscriptionPlaylistItems(channels, uploadsPerChannel, authVersion = state.authVersion) {
   const results = [];
 
   for (let index = 0; index < channels.length; index += PLAYLIST_FETCH_BATCH_SIZE) {
+    if (authVersion !== state.authVersion) {
+      break;
+    }
     const batch = channels.slice(index, index + PLAYLIST_FETCH_BATCH_SIZE);
     const batchResults = await Promise.allSettled(
       batch.map((channel) => youtubeFetch("/playlistItems", {
@@ -799,6 +1021,63 @@ function waitForIdleFrame() {
 
     window.setTimeout(resolve, 50);
   });
+}
+
+function scheduleHomeFeedEnrichment(options = {}) {
+  if ((state.homeFeedLoaded && !options.refresh)
+    || state.homeFeedLoadPromise
+    || state.homeFeedLoadScheduled
+    || !state.auth.accessToken) {
+    return;
+  }
+
+  state.homeFeedLoadScheduled = true;
+  waitForIdleFrame().then(() => {
+    state.homeFeedLoadScheduled = false;
+    if (!state.auth.accessToken) {
+      return false;
+    }
+    return loadPersonalHomeFeed(options);
+  }).catch(() => {
+    state.homeFeedLoadScheduled = false;
+  });
+}
+
+function loadPersonalHomeFeed(options = {}) {
+  if (!state.auth.accessToken) {
+    return Promise.resolve(false);
+  }
+  if (state.homeFeedLoadPromise) {
+    return state.homeFeedLoadPromise;
+  }
+
+  const authVersion = state.authVersion;
+  const request = buildPersonalHomeFeed(state.subscriptionVideos)
+    .then((feed) => {
+      if (authVersion !== state.authVersion) {
+        return false;
+      }
+      if (feed.length) {
+        state.homeFeed = feed;
+        if (state.view === "home" || !state.queue.length) {
+          state.queue = feed;
+        }
+      }
+      state.homeFeedLoaded = true;
+      if (state.view === "home") {
+        render();
+      }
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => {
+      if (state.homeFeedLoadPromise === request) {
+        state.homeFeedLoadPromise = null;
+      }
+    });
+
+  state.homeFeedLoadPromise = request;
+  return request;
 }
 
 async function buildPersonalHomeFeed(subscribedVideos = []) {
@@ -1077,9 +1356,13 @@ async function loadChannels(channelIds) {
 }
 
 async function loadVideoDetails(videoIds, options = {}) {
-  const chunks = chunk([...new Set(videoIds.filter(Boolean))], 50);
+  const uniqueIds = [...new Set(videoIds.filter(Boolean))];
+  const idsToLoad = options.refresh
+    ? uniqueIds
+    : uniqueIds.filter((id) => !state.videoCacheById[id]);
+  const chunks = chunk(idsToLoad, 50);
   if (!chunks.length) {
-    return [];
+    return uniqueIds.map((id) => state.videoCacheById[id]).filter(Boolean);
   }
 
   const responses = await Promise.allSettled(chunks.map((ids) => youtubeFetch("/videos", {
@@ -1097,7 +1380,9 @@ async function loadVideoDetails(videoIds, options = {}) {
   }
 
   const videos = fulfilled.flatMap((payload) => payload.items || []).map(normalizeVideoResource);
-  return hydrateVideoChannelThumbnails(videos);
+  const hydrated = await hydrateVideoChannelThumbnails(videos);
+  cacheVideos(hydrated);
+  return uniqueIds.map((id) => state.videoCacheById[id]).filter(Boolean);
 }
 
 async function loadChannelById(channelId, options = {}) {
@@ -1146,9 +1431,13 @@ async function loadChannelVideos(channelId, options = {}) {
   const ids = [...new Set((payload.items || [])
     .map((item) => item.contentDetails?.videoId)
     .filter(Boolean))];
-  const videos = (await loadVideoDetails(ids, { auth: Boolean(state.auth.accessToken) }))
+  const videos = (await loadVideoDetails(ids, {
+    auth: Boolean(state.auth.accessToken),
+    refresh: options.refresh,
+  }))
     .filter((video) => !isLikelyShort(video));
   state.channelVideosById[channelId] = videos;
+  pruneRecord(state.channelVideosById, MAX_CHANNEL_VIDEO_CACHES, new Set([channelId]));
   return videos;
 }
 
@@ -1158,26 +1447,39 @@ async function loadActiveChannel(options = {}) {
     return;
   }
 
+  const loadVersion = ++state.channelLoadVersion;
   state.channelLoading = true;
   setLoading("Loading channel");
   try {
     const channel = await loadChannelById(channelId, options);
+    if (loadVersion !== state.channelLoadVersion || channelId !== state.activeChannelId) {
+      return;
+    }
     rememberChannel(channel);
     await loadChannelVideos(channelId, options);
+    if (loadVersion !== state.channelLoadVersion || channelId !== state.activeChannelId) {
+      return;
+    }
     state.error = "";
   } catch (error) {
+    if (loadVersion !== state.channelLoadVersion) {
+      return;
+    }
     state.error = error.message;
     if (!options.quiet) {
       openSheet("Could not load channel", error.message, [{ label: "Close", action: closeSheet }]);
     }
   } finally {
-    state.channelLoading = false;
-    clearLoading();
+    if (loadVersion === state.channelLoadVersion) {
+      state.channelLoading = false;
+      clearLoading();
+    }
   }
 }
 
 async function runSearch(query) {
   const cleaned = query.trim();
+  const loadVersion = ++state.searchLoadVersion;
   state.query = cleaned;
 
   if (!cleaned) {
@@ -1211,14 +1513,23 @@ async function runSearch(query) {
     }, { auth: Boolean(state.auth.accessToken) });
 
     const ids = (search.items || []).map((item) => item.id?.videoId).filter(Boolean);
-    state.searchResults = (await loadVideoDetails(ids, { auth: Boolean(state.auth.accessToken) }))
+    const results = await loadVideoDetails(ids, { auth: Boolean(state.auth.accessToken) });
+    if (loadVersion !== state.searchLoadVersion) {
+      return;
+    }
+    state.searchResults = results
       .filter((video) => !isLikelyShort(video));
     state.error = "";
   } catch (error) {
+    if (loadVersion !== state.searchLoadVersion) {
+      return;
+    }
     state.error = error.message;
     openSheet("Search failed", error.message, [{ label: "Close", action: closeSheet }]);
   } finally {
-    clearLoading();
+    if (loadVersion === state.searchLoadVersion) {
+      clearLoading();
+    }
   }
 }
 
@@ -1231,6 +1542,7 @@ function rememberSearch(query) {
 }
 
 async function loadComments(videoId) {
+  const loadVersion = ++state.commentsLoadVersion;
   setLoading("Loading comments");
   try {
     const payload = await youtubeFetch("/commentThreads", {
@@ -1241,7 +1553,7 @@ async function loadComments(videoId) {
       textFormat: "plainText",
     }, { auth: Boolean(state.auth.accessToken) });
 
-    state.comments = (payload.items || []).map((item) => {
+    const comments = (payload.items || []).map((item) => {
       const comment = item.snippet?.topLevelComment?.snippet || {};
       return {
         author: comment.authorDisplayName || "YouTube user",
@@ -1250,31 +1562,48 @@ async function loadComments(videoId) {
         likes: comment.likeCount || 0,
       };
     });
-    render();
+    if (loadVersion !== state.commentsLoadVersion || videoId !== state.activeVideoId) {
+      return;
+    }
+    state.comments = comments;
   } catch (error) {
+    if (loadVersion !== state.commentsLoadVersion) {
+      return;
+    }
     openSheet("Comments unavailable", error.message, [{ label: "Close", action: closeSheet }]);
   } finally {
-    clearLoading();
+    if (loadVersion === state.commentsLoadVersion) {
+      clearLoading();
+    }
   }
 }
 
 async function loadLikedVideos() {
-  await ensureReadAuth();
+  const authVersion = state.authVersion;
   setLoading("Loading liked videos");
   try {
+    await ensureReadAuth();
     const payload = await youtubeFetch("/videos", {
       part: "snippet,contentDetails,statistics",
       myRating: "like",
       maxResults: 25,
     }, { auth: true });
-    state.likedVideos = (await hydrateVideoChannelThumbnails((payload.items || [])
+    const likedVideos = (await hydrateVideoChannelThumbnails((payload.items || [])
       .map(normalizeVideoResource)))
       .filter((video) => !isLikelyShort(video));
-    render();
+    if (authVersion !== state.authVersion) {
+      return;
+    }
+    state.likedVideos = likedVideos;
   } catch (error) {
+    if (authVersion !== state.authVersion) {
+      return;
+    }
     openSheet("Liked videos unavailable", error.message, [{ label: "Close", action: closeSheet }]);
   } finally {
-    clearLoading();
+    if (authVersion === state.authVersion) {
+      clearLoading();
+    }
   }
 }
 
@@ -1295,7 +1624,6 @@ async function rateActiveVideo() {
     }, { auth: true, method: "POST" });
     state.ratings[video.id] = nextRating;
     showToast(nextRating === "like" ? "Liked." : "Like removed.");
-    render();
   } catch (error) {
     openSheet("Like needs permission", error.message, [{ label: "Close", action: closeSheet }]);
   } finally {
@@ -1318,14 +1646,13 @@ async function subscribeToActiveChannel(channelId = currentVideo()?.channelId) {
       await youtubeFetch("/subscriptions", { id: subscriptionId }, { auth: true, method: "DELETE" });
       delete state.subscriptionIdsByChannel[channelId];
       state.subscriptions = state.subscriptions.filter((channel) => channel.id !== channelId);
+      state.subscriptionVideos = state.subscriptionVideos.filter((item) => item.channelId !== channelId);
       showToast("Unsubscribed.");
     } else {
-      const response = await fetch(`${API_BASE}/subscriptions?part=snippet`, {
+      const payload = await youtubeFetch("/subscriptions", { part: "snippet" }, {
+        auth: true,
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${state.auth.accessToken}`,
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           snippet: {
             resourceId: {
@@ -1335,10 +1662,6 @@ async function subscribeToActiveChannel(channelId = currentVideo()?.channelId) {
           },
         }),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error?.message || "Could not subscribe.");
-      }
 
       state.subscriptionIdsByChannel[channelId] = payload.id;
       const channel = state.channelCacheById[channelId] || channelFromVideo(findVideoByChannel(channelId)) || channelFromVideo(video);
@@ -1348,7 +1671,6 @@ async function subscribeToActiveChannel(channelId = currentVideo()?.channelId) {
       showToast("Subscribed.");
     }
 
-    render();
   } catch (error) {
     openSheet("Subscribe needs permission", error.message, [{ label: "Close", action: closeSheet }]);
   } finally {
@@ -1434,6 +1756,43 @@ function cacheChannels(channels = []) {
       };
     }
   });
+  pruneRecord(
+    state.channelCacheById,
+    MAX_CHANNEL_CACHE_ENTRIES,
+    new Set([state.activeChannelId, state.auth.profile?.id, ...demoChannels.map((channel) => channel.id)].filter(Boolean)),
+  );
+}
+
+function cacheVideos(videos = []) {
+  videos.filter(Boolean).forEach((video) => {
+    if (!video.id) {
+      return;
+    }
+    state.videoCacheById[video.id] = {
+      ...(state.videoCacheById[video.id] || {}),
+      ...video,
+    };
+  });
+  pruneRecord(
+    state.videoCacheById,
+    MAX_VIDEO_CACHE_ENTRIES,
+    new Set([state.activeVideoId, ...demoVideos.map((video) => video.id)].filter(Boolean)),
+  );
+}
+
+function pruneRecord(record, maxEntries, protectedKeys = new Set()) {
+  const keys = Object.keys(record);
+  let removeCount = Math.max(0, keys.length - maxEntries);
+  for (const key of keys) {
+    if (!removeCount) {
+      break;
+    }
+    if (protectedKeys.has(key)) {
+      continue;
+    }
+    delete record[key];
+    removeCount -= 1;
+  }
 }
 
 async function hydrateVideoChannelThumbnails(videos = []) {
@@ -1453,6 +1812,7 @@ async function hydrateVideoChannelThumbnails(videos = []) {
     video.channelThumbnailUrl = video.channelThumbnailUrl || state.channelThumbnailsById[video.channelId] || "";
   });
 
+  cacheVideos(videos);
   return videos;
 }
 
@@ -1574,7 +1934,7 @@ function currentVideo() {
 }
 
 function findVideo(videoId) {
-  return [
+  return state.videoCacheById[videoId] || [
     ...state.homeFeed,
     ...state.searchResults,
     ...state.queue,
@@ -1652,14 +2012,15 @@ function openWatch(videoId, queue = []) {
   closePlayerFullscreen();
   state.activeVideoId = videoId;
   state.queue = queue.length ? queue : state.homeFeed;
+  state.commentsLoadVersion += 1;
   state.comments = [];
   state.playerError = null;
   state.view = "watch";
+  writeJson("yt_active_video_id", videoId);
   writeJson("yt_last_view", "watch");
   addHistory(video);
   render();
   resetScroll();
-  mountPlayer(false);
 }
 
 function openChannel(channelId) {
@@ -1680,6 +2041,7 @@ function openChannel(channelId) {
 }
 
 function addHistory(video) {
+  cacheVideos([video]);
   state.localHistory = [
     video,
     ...state.localHistory.filter((item) => item.id !== video.id),
@@ -1719,30 +2081,26 @@ async function shareVideo(video) {
   }
 }
 
-async function shareSite() {
-  const url = location.origin + location.pathname;
-  try {
-    if (navigator.share) {
-    await navigator.share({ title: "SimaTube", url });
-      return;
-    }
-
-    await navigator.clipboard.writeText(url);
-    showToast("Site link copied.");
-  } catch {
-    openSheet("Share this site", url, [
-      { label: "Close", action: closeSheet },
-    ]);
-  }
-}
-
 function setView(view) {
   const changed = state.view !== view;
+  if (changed && state.view === "search") {
+    state.searchLoadVersion += 1;
+  }
+  if (changed && state.view === "watch") {
+    state.commentsLoadVersion += 1;
+  }
+  if (changed && state.view === "channel") {
+    state.channelLoadVersion += 1;
+    state.channelLoading = false;
+  }
   if (view !== "watch") {
     closePlayerFullscreen();
   }
   state.view = view;
   state.error = "";
+  if (changed) {
+    state.loading = "";
+  }
   writeJson("yt_last_view", view);
   render();
   if (changed) {
@@ -1752,8 +2110,15 @@ function setView(view) {
   if (view === "home" && !state.auth.accessToken && hasApiAccess()) {
     loadPopularHome();
   }
-  if (view === "subscriptions" && state.auth.accessToken && !state.subscriptions.length) {
-    loadSubscriptionsAndFeed();
+  if (view === "home" && state.auth.accessToken) {
+    if (!state.subscriptionsLoaded) {
+      loadSubscriptionsAndFeed({ quiet: true, includeHome: true });
+    } else {
+      scheduleHomeFeedEnrichment();
+    }
+  }
+  if (view === "subscriptions" && state.auth.accessToken && !state.subscriptionsLoaded) {
+    loadSubscriptionsAndFeed({ includeHome: false });
   }
   if (view === "channel" && state.activeChannelId && !state.channelVideosById[state.activeChannelId]?.length) {
     loadActiveChannel({ quiet: true });
@@ -1805,6 +2170,7 @@ function showToast(message) {
 }
 
 function openSheet(title, body, actions = []) {
+  openSheet.lastFocus = document.activeElement;
   const actionHtml = actions.map((action, index) => {
     if (action.href) {
       return `<a class="sheet-action" href="${escapeHtml(action.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(action.label)}</a>`;
@@ -1822,6 +2188,8 @@ function openSheet(title, body, actions = []) {
       </section>
     </div>
   `;
+  document.documentElement.classList.add("sheet-open");
+  document.body.classList.add("sheet-open");
 
   sheetRoot.querySelector(".sheet-actions")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-sheet-action]");
@@ -1831,10 +2199,17 @@ function openSheet(title, body, actions = []) {
     const action = actions[Number(button.dataset.sheetAction)];
     action?.action?.();
   }, { once: false });
+  window.requestAnimationFrame(() => sheetRoot.querySelector(".sheet-action")?.focus());
 }
 
 function closeSheet() {
   sheetRoot.replaceChildren();
+  document.documentElement.classList.remove("sheet-open");
+  document.body.classList.remove("sheet-open");
+  if (openSheet.lastFocus?.isConnected) {
+    openSheet.lastFocus.focus();
+  }
+  openSheet.lastFocus = null;
 }
 
 function setupCopy() {
@@ -1867,30 +2242,64 @@ function shouldShowReconnect() {
 
 function render() {
   if (shouldShowInstallIntro()) {
+    destroyPlayer();
     app.innerHTML = renderInstallIntro();
     return;
   }
 
   if (shouldShowReconnect()) {
+    destroyPlayer();
     app.innerHTML = renderReconnectScreen();
     return;
   }
 
   if (shouldShowOnboarding()) {
+    destroyPlayer();
     app.innerHTML = renderOnboarding();
     return;
   }
 
+  const existingWatchVideoId = app.querySelector(".player-shell")?.dataset.videoId;
+  const descriptionExpanded = existingWatchVideoId === state.activeVideoId
+    && Boolean(app.querySelector("#description-toggle")?.checked);
+  const retainedPlayerShell = takeReusablePlayerShell();
+  if (!retainedPlayerShell) {
+    destroyPlayer();
+  }
+
   app.innerHTML = `
     ${renderTopbar()}
-    ${state.loading ? `<div class="loading-bar"><span>${escapeHtml(state.loading)}</span></div>` : ""}
+    ${state.loading ? `<div class="loading-bar" role="status" aria-label="${escapeHtml(state.loading)}"><span aria-hidden="true"></span></div>` : ""}
     <section class="screen screen-${escapeHtml(state.view)}">${renderView()}</section>
     ${renderBottomNav()}
   `;
 
-  if (state.view === "watch") {
+  if (retainedPlayerShell) {
+    const nextPlayerShell = app.querySelector(".player-shell");
+    nextPlayerShell?.replaceWith(retainedPlayerShell);
+    setFullscreenButtonState(retainedPlayerShell.classList.contains("app-fullscreen"));
+  } else if (state.view === "watch") {
     mountPlayer(false);
   }
+
+  const descriptionToggle = app.querySelector("#description-toggle");
+  if (descriptionToggle) {
+    descriptionToggle.checked = descriptionExpanded;
+  }
+}
+
+function takeReusablePlayerShell() {
+  if (state.view !== "watch" || !state.player || state.playerError) {
+    return null;
+  }
+
+  const shell = app.querySelector(".player-shell");
+  if (!shell || shell.dataset.videoId !== state.activeVideoId || state.playerVideoId !== state.activeVideoId) {
+    return null;
+  }
+
+  shell.remove();
+  return shell;
 }
 
 function renderTopbar() {
@@ -1965,6 +2374,9 @@ function renderOnboarding() {
       </div>
       <div class="onboarding-actions">
         <button class="primary-button big" type="button" data-action="signin">Sign in to SimaTube</button>
+        ${!state.config.serverOAuthEnabled && !hasOAuthClient()
+          ? `<button class="ghost-button" type="button" data-action="continue-demo">Preview demo feed</button>`
+          : ""}
       </div>
       <div class="onboarding-steps">
         <div><strong>1</strong><span>Choose your Google account.</span></div>
@@ -1996,10 +2408,10 @@ function renderReconnectScreen() {
 
 function renderHome() {
   const feed = filteredHomeFeed();
+  const feedSource = state.homeFilter === "history" ? "history" : "home";
   const personalized = Boolean(state.auth.profile);
   return `
     <section class="home-rail">
-      ${renderInstallBanner()}
       ${state.demoMode && !personalized ? renderDemoPill() : ""}
       ${state.reconnectFailed && state.rememberSignIn && !personalized ? renderReconnectPill() : ""}
       <div class="chip-row" aria-label="Home filters">
@@ -2009,7 +2421,7 @@ function renderHome() {
         ${filterChip("saved", "Saved")}
         ${filterChip("history", "History")}
       </div>
-      ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, "home")}
+      ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, feedSource)}
     </section>
   `;
 }
@@ -2036,23 +2448,6 @@ function renderFeedLoader() {
   `;
 }
 
-function renderInstallBanner() {
-  if (state.installDismissed || isHomeScreenMode() || state.auth.profile) {
-    return "";
-  }
-
-  return `
-    <section class="install-banner">
-      <div>
-        <strong>Add it to your Home Screen</strong>
-        <span>Safari Share button, then Add to Home Screen.</span>
-      </div>
-      <button class="text-button" type="button" data-action="install-help">How</button>
-      <button class="icon-button small" type="button" data-action="dismiss-install" aria-label="Dismiss">${icon("close")}</button>
-    </section>
-  `;
-}
-
 function renderDemoPill() {
   return `
     <section class="demo-pill">
@@ -2073,7 +2468,7 @@ function renderReconnectPill() {
 
 function filterChip(value, label) {
   const active = state.homeFilter === value ? " active" : "";
-  return `<button class="chip${active}" type="button" data-action="home-filter" data-filter="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+  return `<button class="chip${active}" type="button" data-action="home-filter" data-filter="${escapeHtml(value)}" aria-pressed="${state.homeFilter === value ? "true" : "false"}">${escapeHtml(label)}</button>`;
 }
 
 function renderSearch() {
@@ -2082,7 +2477,7 @@ function renderSearch() {
       <form class="search-form" data-action="search-form">
         <label class="search-box">
           ${icon("search")}
-          <input name="query" value="${escapeHtml(state.query)}" type="search" placeholder="Search SimaTube" autocomplete="off" />
+          <input name="query" value="${escapeHtml(state.query)}" type="search" placeholder="Search SimaTube" aria-label="Search videos" autocomplete="off" />
         </label>
         <button class="text-button" type="submit">Search</button>
       </form>
@@ -2111,7 +2506,7 @@ function renderWatch() {
 
   return `
     <section class="watch-view">
-      <div class="player-shell">
+      <div class="player-shell" data-video-id="${escapeHtml(video.id)}">
         <div id="playerMount"></div>
         <button class="poster-button" type="button" data-action="play" aria-label="Play video">
           <img src="${escapeHtml(video.thumbnailUrl)}" alt="" />
@@ -2145,7 +2540,7 @@ function renderWatch() {
               <small>${subscribed ? "Subscribed" : "Channel"}</small>
             </span>
           </button>
-          <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe">${subscribed ? "Subscribed" : "Subscribe"}</button>
+          <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe" aria-pressed="${subscribed ? "true" : "false"}">${subscribed ? "Subscribed" : "Subscribe"}</button>
         </div>
         <div class="action-row" aria-label="Video actions">
           ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
@@ -2233,6 +2628,8 @@ function renderSubscriptions() {
     `;
   }
 
+  const visibleChannels = state.subscriptions.slice(0, state.visibleSubscriptionChannels);
+  const remainingChannels = Math.max(0, state.subscriptions.length - visibleChannels.length);
   return `
     <section class="subscriptions-view">
       <div class="section-head sticky-head">
@@ -2240,12 +2637,18 @@ function renderSubscriptions() {
         <button class="text-button" type="button" data-action="refresh-subs">Refresh</button>
       </div>
       <div class="channel-strip">
-        ${state.subscriptions.map((channel) => `
+        ${visibleChannels.map((channel) => `
           <button class="channel-bubble" type="button" data-action="open-channel" data-channel-id="${escapeHtml(channel.id)}">
             ${renderChannelImage(channel)}
             <span>${escapeHtml(channel.title)}</span>
           </button>
         `).join("")}
+        ${remainingChannels ? `
+          <button class="channel-bubble channel-more" type="button" data-action="load-more-channels" aria-label="Show more channels">
+            <span class="channel-more-icon" aria-hidden="true">+${Math.min(remainingChannels, SUBSCRIPTION_CHANNEL_INCREMENT)}</span>
+            <span>More</span>
+          </button>
+        ` : ""}
       </div>
       ${state.feedLoading ? renderFeedLoader() : renderSubscriptionContent()}
     </section>
@@ -2310,7 +2713,7 @@ function renderChannel() {
         </div>
         ${channel.description ? `<p class="channel-description">${escapeHtml(channel.description)}</p>` : ""}
         <div class="channel-actions">
-          <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe-channel">${subscribed ? "Subscribed" : "Subscribe"}</button>
+          <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe-channel" aria-pressed="${subscribed ? "true" : "false"}">${subscribed ? "Subscribed" : "Subscribe"}</button>
           <button class="text-button" type="button" data-action="refresh-channel">Refresh</button>
         </div>
       </section>
@@ -2340,7 +2743,7 @@ function sortedChannelVideos(channelId) {
 
 function channelTab(value, label) {
   const active = state.channelSort === value ? " active" : "";
-  return `<button class="chip${active}" type="button" data-action="channel-sort" data-sort="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+  return `<button class="chip${active}" type="button" data-action="channel-sort" data-sort="${escapeHtml(value)}" aria-pressed="${state.channelSort === value ? "true" : "false"}">${escapeHtml(label)}</button>`;
 }
 
 function renderChannelLoader() {
@@ -2373,7 +2776,6 @@ function renderYou() {
         </div>
         <button class="text-button" type="button" data-action="${profile ? "signout" : "signin"}">${profile ? "Sign out" : "Sign in"}</button>
       </section>
-      ${state.config.youtubeApiKey && state.config.googleOAuthClientId ? "" : renderSetupStatus()}
       <section class="library-block">
         <div class="section-head">
           <h2>History</h2>
@@ -2392,48 +2794,28 @@ function renderYou() {
   `;
 }
 
-function renderSetupStatus() {
-  if (state.config.youtubeApiKey && state.config.googleOAuthClientId) {
-    return `
-      <section class="setup-status ready">
-        <div><span>Link</span><strong>Ready for you and your friend</strong></div>
-        <button class="text-button" type="button" data-action="share-site">Share</button>
-      </section>
-    `;
-  }
-
-  return `
-    <section class="setup-status">
-      <div><span>API key</span><strong>${state.config.youtubeApiKey ? "Configured" : "Missing"}</strong></div>
-      <div><span>OAuth</span><strong>${state.config.googleOAuthClientId ? "Configured" : "Missing"}</strong></div>
-      <div><span>Local config</span><strong>${state.configLocalLoaded ? "Loaded" : "Not found"}</strong></div>
-      <button class="text-button" type="button" data-action="sheet" data-sheet="setup">Setup</button>
-    </section>
-  `;
-}
-
-function renderHomeScreenCard() {
-  return `
-    <section class="home-screen-card">
-      <div>
-        <h2>Phone shortcut</h2>
-        <p>${isHomeScreenMode() ? "Opened from your Home Screen." : "Add this site to your iPhone Home Screen for the cleanest flow."}</p>
-      </div>
-      <button class="text-button" type="button" data-action="install-help">How</button>
-    </section>
-  `;
-}
-
 function renderVideoList(videos, source) {
   const list = Array.isArray(videos) ? videos.filter(Boolean) : [];
   if (!list.length) {
     return `<p class="empty-text">Nothing to show yet.</p>`;
   }
 
-  return `<div class="video-list">${list.map((video) => renderVideoRow(video, source)).join("")}</div>`;
+  const visibleLimit = state.visibleRowsBySource[source] || INITIAL_VIDEO_ROWS;
+  const visibleVideos = list.slice(0, visibleLimit);
+  const remaining = Math.max(0, list.length - visibleVideos.length);
+  return `
+    <div class="video-list">${visibleVideos.map((video, index) => renderVideoRow(video, source, index)).join("")}</div>
+    ${remaining ? `
+      <div class="load-more-row">
+        <button class="secondary-button load-more-button" type="button" data-action="load-more" data-source="${escapeHtml(source)}">
+          Show ${Math.min(remaining, VIDEO_ROWS_INCREMENT)} more
+        </button>
+      </div>
+    ` : ""}
+  `;
 }
 
-function renderVideoRow(video, source) {
+function renderVideoRow(video, source, itemIndex = -1) {
   if (!video?.id) {
     return "";
   }
@@ -2444,12 +2826,16 @@ function renderVideoRow(video, source) {
   const stateClass = [
     saved ? "is-saved" : "",
     watched ? "is-watched" : "",
+    itemIndex >= 0 && itemIndex < 6 ? "motion-entry" : "",
   ].filter(Boolean).join(" ");
+  const entryStyle = itemIndex >= 0 && itemIndex < 6 ? ` style="--item-index: ${itemIndex};"` : "";
+  const imageLoading = itemIndex >= 0 && itemIndex < 2 ? "eager" : "lazy";
+  const imagePriority = itemIndex === 0 ? "high" : "low";
 
   return `
-    <article class="video-row ${stateClass}">
-      <button class="thumb-button" type="button" data-action="watch" data-video-id="${escapeHtml(video.id)}" data-source="${escapeHtml(source)}">
-        <img src="${escapeHtml(video.thumbnailUrl)}" alt="" loading="lazy" />
+    <article class="video-row ${stateClass}"${entryStyle}>
+      <button class="thumb-button" type="button" data-action="watch" data-video-id="${escapeHtml(video.id)}" data-source="${escapeHtml(source)}" aria-label="Play ${escapeHtml(video.title)}">
+        <img src="${escapeHtml(video.thumbnailUrl)}" alt="" loading="${imageLoading}" decoding="async" fetchpriority="${imagePriority}" />
         ${saved ? `<span class="saved-badge">${icon("check")}Saved</span>` : ""}
         ${watched ? `<span class="watch-progress" aria-hidden="true"></span>` : ""}
         ${video.duration ? `<span class="duration">${escapeHtml(video.duration)}</span>` : ""}
@@ -2527,8 +2913,9 @@ function renderBottomNav() {
 
 function navButton(view, label, iconName) {
   const active = state.view === view ? " active" : "";
+  const current = state.view === view ? ` aria-current="page"` : "";
   return `
-    <button class="nav-item${active}" type="button" data-action="view" data-view="${escapeHtml(view)}" aria-label="${escapeHtml(label)}">
+    <button class="nav-item${active}" type="button" data-action="view" data-view="${escapeHtml(view)}" aria-label="${escapeHtml(label)}"${current}>
       ${icon(iconName)}
       <span>${escapeHtml(label)}</span>
     </button>
@@ -2561,20 +2948,28 @@ function icon(name) {
 }
 
 async function mountPlayer(autoplay) {
-  const mount = document.querySelector("#playerMount");
-  if (!mount || !state.ytApiReady || !window.YT?.Player) {
+  let mount = document.querySelector("#playerMount");
+  const video = currentVideo();
+  if (!mount || state.playerError || !state.ytApiReady || !window.YT?.Player) {
     return;
   }
 
   const existingFrame = state.player?.getIframe?.();
-  if (existingFrame && document.body.contains(existingFrame)) {
+  if (existingFrame && document.body.contains(existingFrame) && state.playerVideoId === video.id) {
     return;
   }
 
-  const video = currentVideo();
-  state.player = null;
-  state.playerReady = false;
-  state.player = new window.YT.Player("playerMount", {
+  if (state.player) {
+    destroyPlayer();
+    mount = document.querySelector("#playerMount");
+    if (!mount) {
+      return;
+    }
+  }
+
+  state.playerVideoId = video.id;
+  let player = null;
+  player = new window.YT.Player(mount, {
     host: "https://www.youtube-nocookie.com",
     videoId: video.id,
     playerVars: {
@@ -2589,17 +2984,40 @@ async function mountPlayer(autoplay) {
     },
     events: {
       onReady: () => {
+        if (state.player !== player || state.playerVideoId !== video.id) {
+          return;
+        }
         state.playerReady = true;
         configurePlayerIframe();
       },
-      onError: (event) => handlePlayerError(event.data),
+      onError: (event) => handlePlayerError(event.data, video.id),
       onStateChange: (event) => {
-        if (event.data === window.YT.PlayerState.ENDED) {
+        if (state.player === player
+          && state.playerVideoId === video.id
+          && event.data === window.YT.PlayerState.ENDED) {
           nextVideo();
         }
       },
     },
   });
+  state.player = player;
+}
+
+function destroyPlayer() {
+  const player = state.player;
+  state.player = null;
+  state.playerVideoId = "";
+  state.playerReady = false;
+
+  if (!player) {
+    return;
+  }
+
+  try {
+    player.destroy?.();
+  } catch {
+    player.getIframe?.()?.remove?.();
+  }
 }
 
 function configurePlayerIframe() {
@@ -2712,7 +3130,10 @@ function replayActive() {
   playActive();
 }
 
-function handlePlayerError(code) {
+function handlePlayerError(code, videoId = state.playerVideoId) {
+  if (!videoId || videoId !== state.activeVideoId || videoId !== state.playerVideoId) {
+    return;
+  }
   const messages = {
     100: "This video was removed, private, or not found.",
     101: "The owner does not allow embedded playback.",
@@ -2720,8 +3141,13 @@ function handlePlayerError(code) {
     153: "YouTube needs a valid browser identity for this embed.",
   };
   state.playerError = messages[code] || "This video cannot play in the embedded player.";
+  destroyPlayer();
   render();
-  window.setTimeout(nextVideo, 1600);
+  window.setTimeout(() => {
+    if (state.activeVideoId === videoId) {
+      nextVideo();
+    }
+  }, 1600);
 }
 
 function nextVideo() {
@@ -2786,20 +3212,7 @@ app.addEventListener("click", async (event) => {
     writeJson("yt_onboarded", false);
     writeJson("yt_demo_mode", false);
     render();
-  }
-  if (action === "install-help") {
-    openSheet("Add to Home Screen", installCopy(), [
-      { label: "Share this link", action: shareSite },
-      { label: "Close", action: closeSheet },
-    ]);
-  }
-  if (action === "share-site") {
-    await shareSite();
-  }
-  if (action === "dismiss-install") {
-    state.installDismissed = true;
-    writeJson("yt_install_dismissed", true);
-    render();
+    resetScroll();
   }
   if (action === "signout") {
     await signOut();
@@ -2842,7 +3255,8 @@ app.addEventListener("click", async (event) => {
     await loadLikedVideos();
   }
   if (action === "refresh-subs") {
-    await loadSubscriptionsAndFeed();
+    state.homeFeedLoaded = false;
+    await loadSubscriptionsAndFeed({ refresh: true, includeHome: state.view === "home" });
   }
   if (action === "refresh-channel") {
     await loadActiveChannel({ refresh: true });
@@ -2851,11 +3265,21 @@ app.addEventListener("click", async (event) => {
     state.channelSort = target.dataset.sort || "latest";
     render();
   }
+  if (action === "load-more") {
+    const source = target.dataset.source || "home";
+    state.visibleRowsBySource[source] = (state.visibleRowsBySource[source] || INITIAL_VIDEO_ROWS)
+      + VIDEO_ROWS_INCREMENT;
+    render();
+  }
+  if (action === "load-more-channels") {
+    state.visibleSubscriptionChannels += SUBSCRIPTION_CHANNEL_INCREMENT;
+    render();
+  }
   if (action === "subscribe-channel") {
     await subscribeToActiveChannel(state.activeChannelId);
   }
   if (action === "quick-search") {
-    state.view = "search";
+    setView("search");
     await runSearch(target.dataset.query);
   }
   if (action === "sheet") {
@@ -2883,19 +3307,16 @@ sheetRoot.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (sheetRoot.childElementCount) {
+      closeSheet();
+      return;
+    }
     closePlayerFullscreen();
   }
 });
 
 function handleSheet(sheet, videoId) {
   const video = videoId ? findVideo(videoId) : currentVideo();
-  if (sheet === "setup") {
-    openSheet("Setup", setupCopy(), [
-      { label: "Open credentials", href: "https://console.cloud.google.com/apis/credentials" },
-      { label: "Close", action: closeSheet },
-    ]);
-    return;
-  }
   if (sheet === "row-more" || sheet === "video-more") {
     openSheet(video.title, "Choose where to continue this video.", [
       { label: state.savedIds.has(video.id) ? "Remove saved" : "Save", action: () => { toggleSaved(video.id); closeSheet(); } },

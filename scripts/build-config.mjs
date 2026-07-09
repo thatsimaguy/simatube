@@ -22,7 +22,7 @@ const config = {
   uploadsPerChannel: Number(process.env.YOUTUBE_UPLOADS_PER_CHANNEL || 2),
 };
 
-await rm(dist, { recursive: true, force: true });
+await rm(dist, { recursive: true, force: true, maxRetries: 3, retryDelay: 120 });
 await mkdir(dist, { recursive: true });
 
 await Promise.all(files.map((file) => cp(new URL(file, root), new URL(file, dist))));

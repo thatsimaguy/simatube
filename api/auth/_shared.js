@@ -110,9 +110,15 @@ function getSession(req, config) {
 }
 
 function setSessionCookie(req, res, config, session) {
-  res.setHeader("Set-Cookie", serializeCookie(req, SESSION_COOKIE, encryptSession(config, session), {
+  appendSetCookie(res, serializeCookie(req, SESSION_COOKIE, encryptSession(config, session), {
     maxAge: SESSION_MAX_AGE,
   }));
+}
+
+function appendSetCookie(res, cookie) {
+  const existing = res.getHeader?.("Set-Cookie");
+  const values = existing ? (Array.isArray(existing) ? existing : [existing]) : [];
+  res.setHeader("Set-Cookie", [...values, cookie]);
 }
 
 function clearAuthCookies(req, res) {
@@ -201,6 +207,7 @@ module.exports = {
   GOOGLE_AUTH_URL,
   READ_SCOPE,
   STATE_COOKIE,
+  appendSetCookie,
   clearAuthCookies,
   exchangeCode,
   getConfig,
