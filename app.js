@@ -106,6 +106,8 @@ const state = {
   onboarded: readJson("yt_onboarded", false),
   orientationLockActive: false,
   orientationFallbackActive: false,
+  fullscreenControlsTimer: 0,
+  fullscreenControlsHidden: false,
   installIntroDone: readJson("yt_install_intro_done", false),
   rememberSignIn: readJson("yt_remember_youtube_signin", false),
   reconnectFailed: false,
@@ -1776,9 +1778,7 @@ function renderWatch() {
           <div class="title-actions">
             <button class="player-fullscreen-button" type="button" data-action="player-fullscreen" aria-label="Fullscreen player">
               <span class="fullscreen-enter">${icon("fullscreen")}</span>
-              <span class="fullscreen-exit">${icon("close")}</span>
             </button>
-            <button class="kebab" type="button" data-action="sheet" data-sheet="video-more" aria-label="More">${icon("more")}</button>
           </div>
         </div>
         <p class="stats-line">${escapeHtml([video.viewCount ? `${video.viewCount} views` : "", timeAgo(video.publishedAt)].filter(Boolean).join(" • "))}</p>
@@ -2115,6 +2115,7 @@ async function togglePlayerFullscreen() {
   setFullscreenButtonState(fullscreen);
 
   if (fullscreen) {
+    showPlayerFullscreenControls();
     state.orientationLockActive = await lockLandscapeOrientation();
     state.orientationFallbackActive = !state.orientationLockActive;
     syncPlayerFullscreenOrientation();
@@ -2122,6 +2123,7 @@ async function togglePlayerFullscreen() {
   }
 
   shell.classList.remove("landscape-fallback");
+  clearPlayerFullscreenControlsTimer();
   unlockLandscapeOrientation();
   state.orientationLockActive = false;
   state.orientationFallbackActive = false;
@@ -2132,6 +2134,7 @@ function closePlayerFullscreen() {
   document.querySelector(".player-shell.app-fullscreen")?.classList.remove("app-fullscreen", "landscape-fallback");
   document.documentElement.classList.remove("player-fullscreen-open");
   document.body.classList.remove("player-fullscreen-open");
+  clearPlayerFullscreenControlsTimer();
   unlockLandscapeOrientation();
   state.orientationLockActive = false;
   state.orientationFallbackActive = false;
@@ -2175,6 +2178,50 @@ function setFullscreenButtonState(fullscreen) {
   document.querySelectorAll(".player-fullscreen-button").forEach((button) => {
     button.setAttribute("aria-label", fullscreen ? "Exit fullscreen player" : "Fullscreen player");
   });
+}
+
+function showPlayerFullscreenControls() {
+  clearPlayerFullscreenControlsTimer();
+  state.fullscreenControlsHidden = false;
+  document.documentElement.classList.remove("player-fullscreen-controls-hidden");
+  document.body.classList.remove("player-fullscreen-controls-hidden");
+
+  if (document.querySelector(".player-shell.app-fullscreen")) {
+    state.fullscreenControlsTimer = window.setTimeout(hidePlayerFullscreenControls, 2600);
+  }
+}
+
+function hidePlayerFullscreenControls() {
+  if (!document.querySelector(".player-shell.app-fullscreen")) {
+    return;
+  }
+
+  state.fullscreenControlsHidden = true;
+  document.documentElement.classList.add("player-fullscreen-controls-hidden");
+  document.body.classList.add("player-fullscreen-controls-hidden");
+}
+
+function clearPlayerFullscreenControlsTimer() {
+  window.clearTimeout(state.fullscreenControlsTimer);
+  state.fullscreenControlsTimer = 0;
+  state.fullscreenControlsHidden = false;
+  document.documentElement.classList.remove("player-fullscreen-controls-hidden");
+  document.body.classList.remove("player-fullscreen-controls-hidden");
+}
+
+function handlePlayerFullscreenWakeTap(event) {
+  const shell = document.querySelector(".player-shell.app-fullscreen");
+  if (!shell || !shell.contains(event.target)) {
+    return false;
+  }
+
+  if (state.fullscreenControlsHidden) {
+    showPlayerFullscreenControls();
+    return true;
+  }
+
+  showPlayerFullscreenControls();
+  return false;
 }
 
 function playActive() {
@@ -2234,6 +2281,10 @@ function queueForSource(source) {
 }
 
 app.addEventListener("click", async (event) => {
+  if (handlePlayerFullscreenWakeTap(event)) {
+    return;
+  }
+
   const target = event.target.closest("[data-action]");
   if (!target) {
     return;

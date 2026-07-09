@@ -154,7 +154,7 @@ svg {
 .title-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
   flex: 0 0 auto;
 }
 
@@ -841,38 +841,42 @@ svg {
 }
 
 .player-fullscreen-button {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   display: grid;
   place-items: center;
   border-radius: 999px;
   cursor: pointer;
+  transition: opacity .18s ease, transform .18s ease, background .18s ease;
 }
 
 .player-fullscreen-button svg {
-  width: 22px;
-  height: 22px;
-}
-
-.fullscreen-exit,
-html.player-fullscreen-open .fullscreen-enter {
-  display: none;
-}
-
-html.player-fullscreen-open .fullscreen-exit {
-  display: grid;
+  width: 28px;
+  height: 28px;
 }
 
 html.player-fullscreen-open .player-fullscreen-button {
   position: fixed;
-  right: calc(12px + env(safe-area-inset-right, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
   bottom: calc(12px + env(safe-area-inset-bottom, 0px));
   z-index: 140;
-  width: 44px;
-  height: 44px;
+  width: 52px;
+  height: 52px;
   color: #fff;
   background: rgba(0, 0, 0, .62);
   box-shadow: 0 6px 22px rgba(0, 0, 0, .35);
+}
+
+html.player-fullscreen-controls-hidden .player-fullscreen-button {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(12px);
+}
+
+html.player-fullscreen-controls-hidden .player-shell.app-fullscreen #playerMount,
+html.player-fullscreen-controls-hidden .player-shell.app-fullscreen #playerMount iframe,
+html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-button {
+  pointer-events: none;
 }
 
 .poster-button {
@@ -1463,90 +1467,5 @@ html.player-fullscreen-open .player-fullscreen-button {
   .bottom-nav {
     bottom: 18px;
     border-radius: 0 0 34px 34px;
-  }
-}
-
-@media (orientation: landscape) and (max-width: 960px) and (max-height: 540px) {
-  html:not(.player-fullscreen-open),
-  body:not(.player-fullscreen-open) {
-    width: 100vw;
-    height: 100vh;
-    overflow: hidden;
-  }
-
-  body:not(.player-fullscreen-open) {
-    position: fixed;
-    inset: 0;
-  }
-
-  body:not(.player-fullscreen-open) .app-shell {
-    position: fixed;
-    left: 50%;
-    top: 50%;
-    width: 100vh;
-    height: 100vw;
-    min-height: 100vw;
-    max-width: none;
-    margin: 0;
-    border: 0;
-    border-radius: 0;
-    box-shadow: none;
-    transform: translate(-50%, -50%) rotate(-90deg);
-    transform-origin: center;
-  }
-
-  body:not(.player-fullscreen-open) .bottom-nav {
-    width: 100vh;
-  }
-
-  body:not(.player-fullscreen-open) .sheet-backdrop {
-    left: 50%;
-    top: 50%;
-    right: auto;
-    bottom: auto;
-    width: 100vh;
-    height: 100vw;
-    transform: translate(-50%, -50%) rotate(-90deg);
-    transform-origin: center;
-  }
-
-  body:not(.player-fullscreen-open) .bottom-sheet {
-    width: 100vh;
-  }
-
-  body:not(.player-fullscreen-open) .toast {
-    top: 50%;
-    bottom: auto;
-    width: min(calc(100vh - 32px), 398px);
-    transform: translate(-50%, calc(-50% + 18px)) rotate(-90deg);
-  }
-
-  body:not(.player-fullscreen-open) .toast.visible {
-    transform: translate(-50%, -50%) rotate(-90deg);
-  }
-
-  @supports (width: 100dvh) {
-    body:not(.player-fullscreen-open) .app-shell {
-      width: 100dvh;
-      height: 100dvw;
-      min-height: 100dvw;
-    }
-
-    body:not(.player-fullscreen-open) .bottom-nav {
-      width: 100dvh;
-    }
-
-    body:not(.player-fullscreen-open) .sheet-backdrop {
-      width: 100dvh;
-      height: 100dvw;
-    }
-
-    body:not(.player-fullscreen-open) .bottom-sheet {
-      width: 100dvh;
-    }
-
-    body:not(.player-fullscreen-open) .toast {
-      width: min(calc(100dvh - 32px), 398px);
-    }
   }
 }
