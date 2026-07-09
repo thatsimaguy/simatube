@@ -1794,8 +1794,9 @@ function renderWatch() {
         <div class="title-row">
           <h1>${escapeHtml(video.title)}</h1>
           <div class="title-actions">
-            <button class="player-fullscreen-button" type="button" data-action="player-fullscreen" aria-label="Fullscreen player">
+            <button class="player-fullscreen-button" type="button" data-action="player-fullscreen" aria-label="Fullscreen player" aria-pressed="false" title="Fullscreen">
               <span class="fullscreen-enter">${icon("fullscreen")}</span>
+              <span class="fullscreen-exit">${icon("fullscreenExit")}</span>
             </button>
           </div>
         </div>
@@ -2052,6 +2053,7 @@ function icon(name) {
     close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>',
     external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14V3ZM5 5h6v2H5v12h12v-6h2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg>',
     fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v2H8.4l3.3 3.3-1.4 1.4L7 8.4V11H5V5Zm8 0h6v6h-2V8.4l-3.3 3.3-1.4-1.4L15.6 7H13V5ZM7 15.6l3.3-3.3 1.4 1.4L8.4 17H11v2H5v-6h2v2.6ZM17 15.6V13h2v6h-6v-2h2.6l-3.3-3.3 1.4-1.4L17 15.6Z"/></svg>',
+    fullscreenExit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.6 6.2V3h2v6.6H5v-2h3.2L4.7 4.1 6.1 2.7l3.5 3.5Zm6.2 1.4H19v2h-6.6V3h2v3.2l3.5-3.5 1.4 1.4-3.5 3.5ZM8.2 16.4H5v-2h6.6V21h-2v-3.2l-3.5 3.5-1.4-1.4 3.5-3.5Zm6.2 1.4V21h-2v-6.6H19v2h-3.2l3.5 3.5-1.4 1.4-3.5-3.5Z"/></svg>',
     home: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.7 12 4l8 6.7V20h-5v-5.5H9V20H4v-9.3Z"/></svg>',
     more: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>',
     plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>',
@@ -2151,6 +2153,8 @@ function closePlayerFullscreen() {
 function setFullscreenButtonState(fullscreen) {
   document.querySelectorAll(".player-fullscreen-button").forEach((button) => {
     button.setAttribute("aria-label", fullscreen ? "Exit fullscreen player" : "Fullscreen player");
+    button.setAttribute("aria-pressed", fullscreen ? "true" : "false");
+    button.setAttribute("title", fullscreen ? "Exit fullscreen" : "Fullscreen");
   });
 }
 
