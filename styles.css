@@ -285,6 +285,78 @@ label:focus-visible {
   }
 }
 
+@keyframes play-breathe {
+  0%, 100% {
+    box-shadow: 0 12px 30px rgba(0, 0, 0, .45), 0 0 0 0 rgba(255, 0, 51, .28);
+  }
+  50% {
+    box-shadow: 0 16px 36px rgba(0, 0, 0, .5), 0 0 0 10px rgba(255, 0, 51, 0);
+  }
+}
+
+@keyframes badge-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes progress-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes control-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes active-pop {
+  0% {
+    transform: scale(.96);
+  }
+  70% {
+    transform: scale(1.04);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes thumb-glow {
+  0%, 100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.08);
+  }
+}
+
+@keyframes fullscreen-in {
+  from {
+    opacity: .92;
+    transform: scale(.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .setup-banner {
   justify-content: space-between;
   gap: 10px;
@@ -666,6 +738,7 @@ label:focus-visible {
   background: #fff;
   color: #0f0f0f;
   box-shadow: 0 6px 18px rgba(255, 255, 255, .12);
+  animation: active-pop 220ms ease both;
 }
 
 .signin-panel {
@@ -740,6 +813,7 @@ label:focus-visible {
 .video-row:hover .thumb-button img,
 .video-row:focus-within .thumb-button img {
   transform: scale(1.018);
+  animation: thumb-glow 1.8s ease-in-out infinite;
 }
 
 .video-row:hover .thumb-button::before,
@@ -780,6 +854,7 @@ label:focus-visible {
   font-weight: 800;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  animation: badge-pop 190ms ease both;
 }
 
 .saved-badge svg {
@@ -796,6 +871,8 @@ label:focus-visible {
   height: 3px;
   background: var(--red);
   box-shadow: 0 -1px 8px rgba(255, 0, 51, .35);
+  transform-origin: left center;
+  animation: progress-grow 320ms ease both;
 }
 
 .video-copy {
@@ -871,6 +948,7 @@ label:focus-visible {
   color: var(--blue);
   font-size: 12px;
   font-weight: 800;
+  animation: badge-pop 180ms ease both;
 }
 
 .skeleton-card {
@@ -987,6 +1065,27 @@ label:focus-visible {
   height: 100dvh;
   aspect-ratio: auto;
   background: #000;
+  animation: fullscreen-in var(--motion-med) both;
+}
+
+html.player-fullscreen-open .topbar,
+html.player-fullscreen-open .bottom-nav,
+html.player-fullscreen-open .loading-bar,
+html.player-fullscreen-open .queue-section,
+html.player-fullscreen-open .watch-detail > .stats-line,
+html.player-fullscreen-open .watch-detail > .channel-row,
+html.player-fullscreen-open .watch-detail > .action-row,
+html.player-fullscreen-open .watch-detail > .description,
+html.player-fullscreen-open .watch-detail > .comments-block,
+html.player-fullscreen-open .title-row h1 {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+html.player-fullscreen-open .app-shell {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .player-shell.app-fullscreen::before,
@@ -1109,6 +1208,7 @@ html.player-fullscreen-open .player-fullscreen-button {
   box-shadow: 0 10px 28px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .14);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
+  animation: control-in 180ms ease both;
 }
 
 html.player-fullscreen-open .player-fullscreen-button svg {
@@ -1130,6 +1230,7 @@ html.player-fullscreen-open .player-fullscreen-button svg {
 }
 
 html.player-fullscreen-controls-hidden .player-fullscreen-button {
+  animation: none;
   opacity: 0;
   pointer-events: none;
   transform: translateY(12px);
@@ -1181,6 +1282,7 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   z-index: 1;
   box-shadow: 0 12px 30px rgba(0, 0, 0, .45);
   transition: transform var(--motion-med), filter var(--motion-fast);
+  animation: play-breathe 2.8s ease-in-out infinite;
 }
 
 .poster-button:hover .big-play,
@@ -1326,6 +1428,7 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   background: rgba(62, 166, 255, .14);
   border-color: rgba(62, 166, 255, .28);
   color: #d8efff;
+  animation: active-pop 220ms ease both;
 }
 
 .action-pill svg {
@@ -1644,6 +1747,7 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
 .nav-item.active {
   color: #fff;
   background: rgba(255, 255, 255, .08);
+  animation: active-pop 220ms ease both;
 }
 
 .nav-item.active::before {
