@@ -1334,6 +1334,7 @@ function openWatch(videoId, queue = []) {
     return;
   }
 
+  closePlayerFullscreen();
   state.activeVideoId = videoId;
   state.queue = queue.length ? queue : state.homeFeed;
   state.comments = [];
@@ -1404,6 +1405,9 @@ async function shareSite() {
 
 function setView(view) {
   const changed = state.view !== view;
+  if (view !== "watch") {
+    closePlayerFullscreen();
+  }
   state.view = view;
   state.error = "";
   writeJson("yt_last_view", view);
@@ -1751,6 +1755,10 @@ function renderWatch() {
     <section class="watch-view">
       <div class="player-shell">
         <div id="playerMount"></div>
+        <button class="player-fullscreen-button" type="button" data-action="player-fullscreen" aria-label="Fullscreen player">
+          <span class="fullscreen-enter">${icon("fullscreen")}</span>
+          <span class="fullscreen-exit">${icon("close")}</span>
+        </button>
         <button class="poster-button" type="button" data-action="play" aria-label="Play video">
           <img src="${escapeHtml(video.thumbnailUrl)}" alt="" />
           <span class="big-play" aria-hidden="true"></span>
@@ -2021,6 +2029,7 @@ function icon(name) {
     check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.2 16.6-4.1-4.1-1.4 1.4 5.5 5.5L21 7.6 19.6 6 9.2 16.6Z"/></svg>',
     close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>',
     external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14V3ZM5 5h6v2H5v12h12v-6h2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v2H8.4l3.3 3.3-1.4 1.4L7 8.4V11H5V5Zm8 0h6v6h-2V8.4l-3.3 3.3-1.4-1.4L15.6 7H13V5ZM7 15.6l3.3-3.3 1.4 1.4L8.4 17H11v2H5v-6h2v2.6ZM17 15.6V13h2v6h-6v-2h2.6l-3.3-3.3 1.4-1.4L17 15.6Z"/></svg>',
     home: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.7 12 4l8 6.7V20h-5v-5.5H9V20H4v-9.3Z"/></svg>',
     more: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>',
     plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>',
@@ -2057,6 +2066,7 @@ async function mountPlayer(autoplay) {
       autoplay: autoplay ? 1 : 0,
       controls: 1,
       enablejsapi: 1,
+      fs: 0,
       iv_load_policy: 3,
       modestbranding: 1,
       playsinline: 1,
@@ -2065,6 +2075,7 @@ async function mountPlayer(autoplay) {
     events: {
       onReady: () => {
         state.playerReady = true;
+        configurePlayerIframe();
       },
       onError: (event) => handlePlayerError(event.data),
       onStateChange: (event) => {
@@ -2074,6 +2085,37 @@ async function mountPlayer(autoplay) {
       },
     },
   });
+}
+
+function configurePlayerIframe() {
+  const iframe = state.player?.getIframe?.();
+  if (!iframe) {
+    return;
+  }
+
+  iframe.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share");
+  iframe.setAttribute("playsinline", "");
+  iframe.setAttribute("webkit-playsinline", "");
+}
+
+function togglePlayerFullscreen() {
+  const shell = document.querySelector(".player-shell");
+  if (!shell) {
+    return;
+  }
+
+  const fullscreen = !shell.classList.contains("app-fullscreen");
+  shell.classList.toggle("app-fullscreen", fullscreen);
+  document.documentElement.classList.toggle("player-fullscreen-open", fullscreen);
+  document.body.classList.toggle("player-fullscreen-open", fullscreen);
+  shell.querySelector(".player-fullscreen-button")
+    ?.setAttribute("aria-label", fullscreen ? "Exit fullscreen player" : "Fullscreen player");
+}
+
+function closePlayerFullscreen() {
+  document.querySelector(".player-shell.app-fullscreen")?.classList.remove("app-fullscreen");
+  document.documentElement.classList.remove("player-fullscreen-open");
+  document.body.classList.remove("player-fullscreen-open");
 }
 
 function playActive() {
@@ -2185,6 +2227,9 @@ app.addEventListener("click", async (event) => {
   if (action === "play") {
     playActive();
   }
+  if (action === "player-fullscreen") {
+    togglePlayerFullscreen();
+  }
   if (action === "replay") {
     replayActive();
   }
@@ -2236,6 +2281,12 @@ app.addEventListener("submit", async (event) => {
 sheetRoot.addEventListener("click", (event) => {
   if (event.target.matches(".sheet-backdrop")) {
     closeSheet();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closePlayerFullscreen();
   }
 });
 

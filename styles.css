@@ -35,6 +35,13 @@ body {
   touch-action: pan-y;
 }
 
+html.player-fullscreen-open,
+body.player-fullscreen-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
 button,
 input,
 a {
@@ -783,6 +790,17 @@ svg {
   overflow: hidden;
 }
 
+.player-shell.app-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  aspect-ratio: auto;
+  background: #000;
+}
+
 #playerMount,
 #playerMount iframe,
 .poster-button,
@@ -795,6 +813,41 @@ svg {
 .poster-button img {
   display: block;
   border: 0;
+}
+
+.player-fullscreen-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, .62);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .35);
+  cursor: pointer;
+}
+
+.player-fullscreen-button svg {
+  width: 20px;
+  height: 20px;
+}
+
+.fullscreen-exit,
+.player-shell.app-fullscreen .fullscreen-enter {
+  display: none;
+}
+
+.player-shell.app-fullscreen .fullscreen-exit {
+  display: grid;
+}
+
+.player-shell.app-fullscreen .player-fullscreen-button {
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
 }
 
 .poster-button {
