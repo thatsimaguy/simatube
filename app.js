@@ -104,6 +104,8 @@ const state = {
   localHistory: readJson("yt_history", []),
   searchHistory: readJson("yt_search_history", []),
   onboarded: readJson("yt_onboarded", false),
+  orientationLockActive: false,
+  orientationFallbackActive: false,
   installIntroDone: readJson("yt_install_intro_done", false),
   rememberSignIn: readJson("yt_remember_youtube_signin", false),
   reconnectFailed: false,
@@ -2098,7 +2100,7 @@ function configurePlayerIframe() {
   iframe.setAttribute("webkit-playsinline", "");
 }
 
-function togglePlayerFullscreen() {
+async function togglePlayerFullscreen() {
   const shell = document.querySelector(".player-shell");
   if (!shell) {
     return;
@@ -2110,12 +2112,61 @@ function togglePlayerFullscreen() {
   document.body.classList.toggle("player-fullscreen-open", fullscreen);
   shell.querySelector(".player-fullscreen-button")
     ?.setAttribute("aria-label", fullscreen ? "Exit fullscreen player" : "Fullscreen player");
+
+  if (fullscreen) {
+    state.orientationLockActive = await lockLandscapeOrientation();
+    state.orientationFallbackActive = !state.orientationLockActive;
+    syncPlayerFullscreenOrientation();
+    return;
+  }
+
+  shell.classList.remove("landscape-fallback");
+  unlockLandscapeOrientation();
+  state.orientationLockActive = false;
+  state.orientationFallbackActive = false;
+  syncPlayerFullscreenOrientation();
 }
 
 function closePlayerFullscreen() {
-  document.querySelector(".player-shell.app-fullscreen")?.classList.remove("app-fullscreen");
+  document.querySelector(".player-shell.app-fullscreen")?.classList.remove("app-fullscreen", "landscape-fallback");
   document.documentElement.classList.remove("player-fullscreen-open");
   document.body.classList.remove("player-fullscreen-open");
+  unlockLandscapeOrientation();
+  state.orientationLockActive = false;
+  state.orientationFallbackActive = false;
+}
+
+async function lockLandscapeOrientation() {
+  try {
+    if (screen.orientation?.lock) {
+      await screen.orientation.lock("landscape");
+      return true;
+    }
+  } catch {
+    // Some mobile browsers only allow CSS-based rotation from web apps.
+  }
+  return false;
+}
+
+function unlockLandscapeOrientation() {
+  try {
+    screen.orientation?.unlock?.();
+  } catch {
+    // Unlock is best-effort and may be unavailable on iOS.
+  }
+}
+
+function syncPlayerFullscreenOrientation() {
+  const shell = document.querySelector(".player-shell.app-fullscreen");
+  if (!shell) {
+    return;
+  }
+
+  shell.classList.toggle("landscape-fallback", state.orientationFallbackActive && isPortraitViewport());
+}
+
+function isPortraitViewport() {
+  return window.matchMedia?.("(orientation: portrait)")?.matches ?? window.innerHeight > window.innerWidth;
 }
 
 function playActive() {
@@ -2228,7 +2279,7 @@ app.addEventListener("click", async (event) => {
     playActive();
   }
   if (action === "player-fullscreen") {
-    togglePlayerFullscreen();
+    await togglePlayerFullscreen();
   }
   if (action === "replay") {
     replayActive();
@@ -2289,6 +2340,9 @@ document.addEventListener("keydown", (event) => {
     closePlayerFullscreen();
   }
 });
+
+window.addEventListener("resize", syncPlayerFullscreenOrientation);
+window.addEventListener("orientationchange", syncPlayerFullscreenOrientation);
 
 function handleSheet(sheet, videoId) {
   const video = videoId ? findVideo(videoId) : currentVideo();
