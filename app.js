@@ -114,7 +114,6 @@ const state = {
   error: "",
   query: "",
   homeFilter: "all",
-  descriptionExpanded: false,
   player: null,
   playerReady: false,
   playerError: null,
@@ -1338,7 +1337,6 @@ function openWatch(videoId, queue = []) {
   state.activeVideoId = videoId;
   state.queue = queue.length ? queue : state.homeFeed;
   state.comments = [];
-  state.descriptionExpanded = false;
   state.playerError = null;
   state.view = "watch";
   writeJson("yt_last_view", "watch");
@@ -1812,12 +1810,15 @@ function actionPill(action, label, iconName) {
 }
 
 function renderDescription(video) {
-  const expanded = state.descriptionExpanded;
   return `
-    <section class="description${expanded ? " expanded" : ""}">
+    <section class="description">
+      <input class="description-toggle-input" id="description-toggle" type="checkbox" />
       <h2>Description</h2>
       <p>${escapeHtml(video.description || "No description available.")}</p>
-      <button class="description-toggle" type="button" data-action="description-toggle">${expanded ? "Show less" : "Show more"}</button>
+      <label class="description-toggle" for="description-toggle">
+        <span class="more-label">Show more</span>
+        <span class="less-label">Show less</span>
+      </label>
     </section>
   `;
 }
@@ -2201,10 +2202,6 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "share") {
     await shareVideo(currentVideo());
-  }
-  if (action === "description-toggle") {
-    state.descriptionExpanded = !state.descriptionExpanded;
-    render();
   }
   if (action === "comments") {
     await loadComments(currentVideo().id);

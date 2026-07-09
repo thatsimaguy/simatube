@@ -982,22 +982,34 @@ svg {
   font-weight: 800;
 }
 
+.description-toggle-input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .description p {
   margin: 7px 0 0;
   color: #ddd;
   font-size: 13px;
   line-height: 19px;
+}
+
+.description-toggle-input:not(:checked) ~ p {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
 
-.description.expanded p {
+.description-toggle-input:checked ~ p {
   display: block;
 }
 
 .description-toggle {
+  display: inline-block;
   margin-top: 8px;
   padding: 0;
   color: #fff;
@@ -1007,6 +1019,11 @@ svg {
   background: transparent;
   border: 0;
   cursor: pointer;
+}
+
+.description-toggle-input:checked ~ .description-toggle .more-label,
+.description-toggle-input:not(:checked) ~ .description-toggle .less-label {
+  display: none;
 }
 
 .comments-block {
