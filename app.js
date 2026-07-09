@@ -94,12 +94,23 @@ const state = {
   homeFeed: [],
   searchResults: [],
   subscriptions: [],
+  subscriptionVideos: [],
   queue: [],
   comments: [],
   likedVideos: [],
   ratings: {},
   subscriptionIdsByChannel: {},
   channelThumbnailsById: {},
+  feedReasonsById: {},
+  activeChannelId: readJson("yt_active_channel_id", ""),
+  channelCacheById: Object.fromEntries(demoChannels.map((channel) => [channel.id, channel])),
+  channelVideosById: Object.fromEntries(demoChannels.map((channel) => [
+    channel.id,
+    demoVideos.filter((video) => video.channelId === channel.id),
+  ])),
+  channelLoading: false,
+  channelSort: "latest",
+  recentChannels: readJson("yt_recent_channels", []),
   savedIds: new Set(readJson("yt_saved_ids", [])),
   localHistory: readJson("yt_history", []),
   searchHistory: readJson("yt_search_history", []),
@@ -121,6 +132,10 @@ const state = {
   playerError: null,
   ytApiReady: false,
 };
+
+if (!Array.isArray(state.recentChannels)) {
+  state.recentChannels = [];
+}
 
 await loadOptionalLocalConfig();
 state.config = normalizeConfig(window.YT_APP_CONFIG || {});
@@ -167,6 +182,9 @@ function boot() {
   state.queue = state.homeFeed;
   render();
   setupPortraitOrientationLock();
+  if (state.view === "channel" && state.activeChannelId) {
+    loadActiveChannel({ quiet: true });
+  }
 
   restoreServerSession().then((restored) => {
     if (restored) {
@@ -328,7 +346,7 @@ function hasOAuthClient() {
 }
 
 function sanitizeView(view) {
-  return ["home", "search", "watch", "subscriptions", "you"].includes(view) ? view : "home";
+  return ["home", "search", "watch", "subscriptions", "channel", "you"].includes(view) ? view : "home";
 }
 
 function readJson(key, fallback) {
@@ -594,6 +612,7 @@ async function signOut() {
   state.auth.scopes.clear();
   state.auth.profile = null;
   state.subscriptions = [];
+  state.subscriptionVideos = [];
   state.subscriptionIdsByChannel = {};
   state.likedVideos = [];
   state.rememberSignIn = false;
@@ -719,6 +738,7 @@ async function loadSubscriptionsAndFeed(options = {}) {
 
     const uniqueVideoIds = [...new Set(uploadVideoIds)];
     const subscribedVideos = await loadVideoDetails(uniqueVideoIds, { auth: true });
+    state.subscriptionVideos = subscribedVideos.filter((video) => !isLikelyShort(video));
     const feed = await buildPersonalHomeFeed(subscribedVideos);
 
     state.homeFeed = feed.length ? feed : subscribedVideos.filter((video) => !isLikelyShort(video));
@@ -849,10 +869,13 @@ function rankHomeCandidates(candidates) {
       ...candidate,
       score: homeScore(candidate.video, candidate.source, interestTerms),
     }))
-    .sort((a, b) => b.score - a.score)
-    .map(({ video }) => video);
+    .sort((a, b) => b.score - a.score);
 
-  return diversifyByChannel(scored).slice(0, 40);
+  const diversified = diversifyByChannel(scored).slice(0, 40);
+  state.feedReasonsById = Object.fromEntries(
+    diversified.map(({ video, source }) => [video.id, feedReasonForSource(video, source)]),
+  );
+  return diversified.map(({ video }) => video);
 }
 
 function dedupeCandidates(candidates) {
@@ -927,19 +950,33 @@ function interestMatchScore(video, interestTerms) {
   return Math.min(matches * 6, 36);
 }
 
-function diversifyByChannel(videos) {
+function feedReasonForSource(video, source) {
+  if (state.subscriptionIdsByChannel[video.channelId]) {
+    return "From your channels";
+  }
+  if (source === "interest") {
+    return state.localHistory.length || state.searchHistory.length ? "Because you watched" : "Picked for you";
+  }
+  if (source === "popular") {
+    return "Trending";
+  }
+  return "Recommended";
+}
+
+function diversifyByChannel(items) {
   const picked = [];
   const deferred = [];
   const channelCounts = new Map();
 
-  videos.forEach((video) => {
+  items.forEach((item) => {
+    const video = item.video || item;
     const count = channelCounts.get(video.channelId) || 0;
     const limit = picked.length < 16 ? 1 : 2;
     if (count < limit) {
-      picked.push(video);
+      picked.push(item);
       channelCounts.set(video.channelId, count + 1);
     } else {
-      deferred.push(video);
+      deferred.push(item);
     }
   });
 
@@ -969,13 +1006,13 @@ function stableDailyJitter(id = "") {
 async function loadChannels(channelIds) {
   const chunks = chunk(channelIds, 50);
   const responses = await Promise.all(chunks.map((ids) => youtubeFetch("/channels", {
-    part: "snippet,contentDetails",
+    part: "snippet,contentDetails,statistics",
     id: ids.join(","),
     maxResults: 50,
   }, { auth: Boolean(state.auth.accessToken) })));
 
   const channels = responses.flatMap((payload) => payload.items || []).map(normalizeChannelResource);
-  cacheChannelThumbnails(channels);
+  cacheChannels(channels);
   return channels;
 }
 
@@ -989,6 +1026,82 @@ async function loadVideoDetails(videoIds, options = {}) {
 
   const videos = responses.flatMap((payload) => payload.items || []).map(normalizeVideoResource);
   return hydrateVideoChannelThumbnails(videos);
+}
+
+async function loadChannelById(channelId, options = {}) {
+  if (!channelId) {
+    return null;
+  }
+
+  const cached = state.channelCacheById[channelId]
+    || state.recentChannels.find((channel) => channel.id === channelId);
+  if (cached?.uploadsPlaylistId && !options.refresh) {
+    return cached;
+  }
+
+  if (!hasApiAccess()) {
+    return cached || channelFromVideo(findVideoByChannel(channelId));
+  }
+
+  const [channel] = await loadChannels([channelId]);
+  return channel || cached || channelFromVideo(findVideoByChannel(channelId));
+}
+
+async function loadChannelVideos(channelId, options = {}) {
+  if (!channelId) {
+    return [];
+  }
+
+  if (state.channelVideosById[channelId]?.length && !options.refresh) {
+    return state.channelVideosById[channelId];
+  }
+
+  if (!hasApiAccess()) {
+    return demoVideos.filter((video) => video.channelId === channelId);
+  }
+
+  const channel = await loadChannelById(channelId, options);
+  if (!channel?.uploadsPlaylistId) {
+    return [];
+  }
+
+  const payload = await youtubeFetch("/playlistItems", {
+    part: "snippet,contentDetails",
+    playlistId: channel.uploadsPlaylistId,
+    maxResults: 30,
+  }, { auth: Boolean(state.auth.accessToken) });
+
+  const ids = [...new Set((payload.items || [])
+    .map((item) => item.contentDetails?.videoId)
+    .filter(Boolean))];
+  const videos = (await loadVideoDetails(ids, { auth: Boolean(state.auth.accessToken) }))
+    .filter((video) => !isLikelyShort(video));
+  state.channelVideosById[channelId] = videos;
+  return videos;
+}
+
+async function loadActiveChannel(options = {}) {
+  const channelId = state.activeChannelId;
+  if (!channelId) {
+    return;
+  }
+
+  state.channelLoading = true;
+  setLoading("Loading channel");
+  try {
+    const channel = await loadChannelById(channelId, options);
+    rememberChannel(channel);
+    await loadChannelVideos(channelId, options);
+    state.error = "";
+  } catch (error) {
+    state.error = error.message;
+    if (!options.quiet) {
+      openSheet("Could not load channel", error.message, [{ label: "Close", action: closeSheet }]);
+    }
+  } finally {
+    state.channelLoading = false;
+    clearLoading();
+  }
 }
 
 async function runSearch(query) {
@@ -1118,21 +1231,21 @@ async function rateActiveVideo() {
   }
 }
 
-async function subscribeToActiveChannel() {
+async function subscribeToActiveChannel(channelId = currentVideo()?.channelId) {
   const video = currentVideo();
-  if (!video?.channelId) {
+  if (!channelId) {
     return;
   }
 
   setLoading("Updating subscription");
   try {
     await ensureWriteAuth();
-    const subscriptionId = state.subscriptionIdsByChannel[video.channelId];
+    const subscriptionId = state.subscriptionIdsByChannel[channelId];
 
     if (subscriptionId) {
       await youtubeFetch("/subscriptions", { id: subscriptionId }, { auth: true, method: "DELETE" });
-      delete state.subscriptionIdsByChannel[video.channelId];
-      state.subscriptions = state.subscriptions.filter((channel) => channel.id !== video.channelId);
+      delete state.subscriptionIdsByChannel[channelId];
+      state.subscriptions = state.subscriptions.filter((channel) => channel.id !== channelId);
       showToast("Unsubscribed.");
     } else {
       const response = await fetch(`${API_BASE}/subscriptions?part=snippet`, {
@@ -1145,7 +1258,7 @@ async function subscribeToActiveChannel() {
           snippet: {
             resourceId: {
               kind: "youtube#channel",
-              channelId: video.channelId,
+              channelId,
             },
           },
         }),
@@ -1155,7 +1268,11 @@ async function subscribeToActiveChannel() {
         throw new Error(payload.error?.message || "Could not subscribe.");
       }
 
-      state.subscriptionIdsByChannel[video.channelId] = payload.id;
+      state.subscriptionIdsByChannel[channelId] = payload.id;
+      const channel = state.channelCacheById[channelId] || channelFromVideo(findVideoByChannel(channelId)) || channelFromVideo(video);
+      if (channel && !state.subscriptions.some((item) => item.id === channelId)) {
+        state.subscriptions = [channel, ...state.subscriptions];
+      }
       showToast("Subscribed.");
     }
 
@@ -1193,18 +1310,33 @@ function normalizeVideoResource(item) {
 
 function normalizeChannelResource(item) {
   const snippet = item.snippet || {};
+  const stats = item.statistics || {};
   return {
     id: item.id || "",
     title: snippet.title || "Channel",
+    description: snippet.description || "",
     thumbnailUrl: bestThumbnail(snippet.thumbnails),
     uploadsPlaylistId: item.contentDetails?.relatedPlaylists?.uploads || "",
+    subscriberCount: formatCount(stats.subscriberCount),
+    subscriberCountNumber: Number(stats.subscriberCount || 0),
+    videoCount: formatCount(stats.videoCount),
+    videoCountNumber: Number(stats.videoCount || 0),
+    viewCount: formatCount(stats.viewCount),
+    viewCountNumber: Number(stats.viewCount || 0),
+    publishedAt: snippet.publishedAt || "",
   };
 }
 
-function cacheChannelThumbnails(channels = []) {
+function cacheChannels(channels = []) {
   channels.forEach((channel) => {
     if (channel.id && channel.thumbnailUrl) {
       state.channelThumbnailsById[channel.id] = channel.thumbnailUrl;
+    }
+    if (channel.id) {
+      state.channelCacheById[channel.id] = {
+        ...(state.channelCacheById[channel.id] || {}),
+        ...channel,
+      };
     }
   });
 }
@@ -1312,7 +1444,14 @@ function videoMeta(video) {
     video.channelTitle,
     video.viewCount ? `${video.viewCount} views` : "",
     timeAgo(video.publishedAt),
-  ].filter(Boolean).join(" • ");
+  ].filter(Boolean).join(" \u2022 ");
+}
+
+function videoStatsMeta(video) {
+  return [
+    video.viewCount ? `${video.viewCount} views` : "",
+    timeAgo(video.publishedAt),
+  ].filter(Boolean).join(" \u2022 ");
 }
 
 function chunk(items, size) {
@@ -1346,8 +1485,67 @@ function findVideo(videoId) {
     ...state.queue,
     ...state.localHistory,
     ...state.likedVideos,
+    ...state.subscriptionVideos,
+    ...Object.values(state.channelVideosById).flat(),
     ...demoVideos,
   ].find((video) => video.id === videoId);
+}
+
+function findVideoByChannel(channelId) {
+  return [
+    ...state.homeFeed,
+    ...state.searchResults,
+    ...state.queue,
+    ...state.localHistory,
+    ...state.likedVideos,
+    ...state.subscriptionVideos,
+    ...Object.values(state.channelVideosById).flat(),
+    ...demoVideos,
+  ].find((video) => video.channelId === channelId);
+}
+
+function channelFromVideo(video) {
+  if (!video?.channelId) {
+    return null;
+  }
+
+  return {
+    id: video.channelId,
+    title: video.channelTitle || "Channel",
+    thumbnailUrl: channelAvatarFor(video),
+    uploadsPlaylistId: "",
+    description: "",
+    subscriberCount: "",
+    videoCount: "",
+    viewCount: "",
+  };
+}
+
+function rememberChannel(channel) {
+  if (!channel?.id) {
+    return;
+  }
+
+  const compact = {
+    id: channel.id,
+    title: channel.title || "Channel",
+    thumbnailUrl: channel.thumbnailUrl || "",
+    uploadsPlaylistId: channel.uploadsPlaylistId || "",
+    description: channel.description || "",
+    subscriberCount: channel.subscriberCount || "",
+    videoCount: channel.videoCount || "",
+    viewCount: channel.viewCount || "",
+    publishedAt: channel.publishedAt || "",
+  };
+  state.channelCacheById[channel.id] = {
+    ...(state.channelCacheById[channel.id] || {}),
+    ...compact,
+  };
+  state.recentChannels = [
+    compact,
+    ...state.recentChannels.filter((item) => item?.id && item.id !== channel.id),
+  ].slice(0, 12);
+  writeJson("yt_recent_channels", state.recentChannels);
 }
 
 function openWatch(videoId, queue = []) {
@@ -1369,12 +1567,30 @@ function openWatch(videoId, queue = []) {
   mountPlayer(false);
 }
 
+function openChannel(channelId) {
+  if (!channelId) {
+    return;
+  }
+
+  closePlayerFullscreen();
+  state.activeChannelId = channelId;
+  state.channelSort = "latest";
+  state.view = "channel";
+  writeJson("yt_active_channel_id", channelId);
+  writeJson("yt_last_view", "channel");
+  rememberChannel(state.channelCacheById[channelId] || channelFromVideo(findVideoByChannel(channelId)));
+  render();
+  resetScroll();
+  loadActiveChannel({ quiet: true });
+}
+
 function addHistory(video) {
   state.localHistory = [
     video,
     ...state.localHistory.filter((item) => item.id !== video.id),
   ].slice(0, 30);
   writeJson("yt_history", state.localHistory);
+  rememberChannel(channelFromVideo(video));
 }
 
 function toggleSaved(videoId) {
@@ -1444,6 +1660,9 @@ function setView(view) {
   if (view === "subscriptions" && state.auth.accessToken && !state.subscriptions.length) {
     loadSubscriptionsAndFeed();
   }
+  if (view === "channel" && state.activeChannelId && !state.channelVideosById[state.activeChannelId]?.length) {
+    loadActiveChannel({ quiet: true });
+  }
 }
 
 function resetScroll() {
@@ -1460,6 +1679,10 @@ function filteredHomeFeed() {
 
   if (state.homeFilter === "saved") {
     return state.homeFeed.filter((video) => state.savedIds.has(video.id));
+  }
+
+  if (state.homeFilter === "explore") {
+    return state.homeFeed.filter((video) => !state.subscriptionIdsByChannel[video.channelId]);
   }
 
   if (state.homeFilter === "history") {
@@ -1603,6 +1826,9 @@ function renderView() {
   if (state.view === "subscriptions") {
     return renderSubscriptions();
   }
+  if (state.view === "channel") {
+    return renderChannel();
+  }
   if (state.view === "you") {
     return renderYou();
   }
@@ -1681,13 +1907,43 @@ function renderHome() {
       ${renderInstallBanner()}
       ${state.demoMode && !personalized ? renderDemoPill() : ""}
       ${state.reconnectFailed && state.rememberSignIn && !personalized ? renderReconnectPill() : ""}
+      ${renderRecentChannelsRail()}
       <div class="chip-row" aria-label="Home filters">
         ${filterChip("all", personalized ? "For you" : "Popular")}
-        ${filterChip("today", "Today")}
+        ${filterChip("today", "New")}
+        ${filterChip("explore", "Explore")}
         ${filterChip("saved", "Saved")}
         ${filterChip("history", "History")}
       </div>
       ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, "home")}
+    </section>
+  `;
+}
+
+function renderRecentChannelsRail() {
+  const fallbackChannels = state.subscriptions.length ? state.subscriptions.slice(0, 10) : demoChannels;
+  const channels = (state.recentChannels.length ? state.recentChannels : fallbackChannels)
+    .filter((channel) => channel?.id)
+    .slice(0, 10);
+
+  if (!channels.length) {
+    return "";
+  }
+
+  const title = state.recentChannels.length ? "Recent channels" : "Channels";
+  return `
+    <section class="channel-rail" aria-label="${escapeHtml(title)}">
+      <div class="rail-head">
+        <h2>${escapeHtml(title)}</h2>
+      </div>
+      <div class="channel-strip compact">
+        ${channels.map((channel) => `
+          <button class="channel-bubble" type="button" data-action="open-channel" data-channel-id="${escapeHtml(channel.id)}">
+            ${renderChannelImage(channel)}
+            <span>${escapeHtml(channel.title)}</span>
+          </button>
+        `).join("")}
+      </div>
     </section>
   `;
 }
@@ -1715,7 +1971,7 @@ function renderFeedLoader() {
 }
 
 function renderInstallBanner() {
-  if (state.installDismissed || isHomeScreenMode()) {
+  if (state.installDismissed || isHomeScreenMode() || state.auth.profile) {
     return "";
   }
 
@@ -1814,13 +2070,15 @@ function renderWatch() {
             </button>
           </div>
         </div>
-        <p class="stats-line">${escapeHtml([video.viewCount ? `${video.viewCount} views` : "", timeAgo(video.publishedAt)].filter(Boolean).join(" • "))}</p>
+        <p class="stats-line">${escapeHtml([video.viewCount ? `${video.viewCount} views` : "", timeAgo(video.publishedAt)].filter(Boolean).join(" \u2022 "))}</p>
         <div class="channel-row">
-          ${renderChannelAvatar(video, "large")}
-          <div>
-            <strong>${escapeHtml(video.channelTitle)}</strong>
-            <span>${subscribed ? "Subscribed" : "Channel"}</span>
-          </div>
+          <button class="channel-link" type="button" data-action="open-channel" data-channel-id="${escapeHtml(video.channelId)}">
+            ${renderChannelAvatar(video, "large")}
+            <span>
+              <strong>${escapeHtml(video.channelTitle)}</strong>
+              <small>${subscribed ? "Subscribed" : "Channel"}</small>
+            </span>
+          </button>
           <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe">${subscribed ? "Subscribed" : "Subscribe"}</button>
         </div>
         <div class="action-row" aria-label="Video actions">
@@ -1828,7 +2086,6 @@ function renderWatch() {
           ${actionPill("replay", "Replay", "replay")}
           ${actionPill("save", saved ? "Saved" : "Save", saved ? "check" : "plus", saved, true)}
           ${actionPill("share", "Share", "share")}
-          <a class="action-pill" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${icon("external")}<span>YouTube</span></a>
         </div>
         ${renderDescription(video)}
         <section class="comments-block">
@@ -1919,12 +2176,97 @@ function renderSubscriptions() {
       <div class="channel-strip">
         ${state.subscriptions.map((channel) => `
           <button class="channel-bubble" type="button" data-action="open-channel" data-channel-id="${escapeHtml(channel.id)}">
-            <img src="${escapeHtml(channel.thumbnailUrl)}" alt="" />
+            ${renderChannelImage(channel)}
             <span>${escapeHtml(channel.title)}</span>
           </button>
         `).join("")}
       </div>
-      ${renderVideoList(state.homeFeed, "subscriptions")}
+      ${renderVideoList(state.subscriptionVideos, "subscriptions")}
+    </section>
+  `;
+}
+
+function renderChannel() {
+  const channel = activeChannel();
+  if (!channel) {
+    return `
+      <section class="channel-view">
+        <p class="empty-text">Choose a channel from Home, Watch, or Subscriptions.</p>
+      </section>
+    `;
+  }
+
+  const subscribed = Boolean(state.subscriptionIdsByChannel[channel.id]);
+  const videos = sortedChannelVideos(channel.id);
+  const youtubeUrl = `https://www.youtube.com/channel/${encodeURIComponent(channel.id)}`;
+  const meta = [
+    channel.subscriberCount ? `${channel.subscriberCount} subscribers` : "",
+    channel.videoCount ? `${channel.videoCount} videos` : "",
+  ].filter(Boolean).join(" \u2022 ");
+
+  return `
+    <section class="channel-view">
+      <section class="channel-hero">
+        <div class="channel-hero-top">
+          <button class="icon-button channel-back" type="button" data-action="view" data-view="home" aria-label="Back to Home">${icon("back")}</button>
+          <a class="channel-youtube-link" href="${escapeHtml(youtubeUrl)}" target="_blank" rel="noopener noreferrer">${icon("external")}<span>YouTube</span></a>
+        </div>
+        <div class="channel-identity">
+          ${renderChannelImage(channel, "hero")}
+          <div>
+            <h1>${escapeHtml(channel.title)}</h1>
+            <p>${escapeHtml(meta || "YouTube channel")}</p>
+          </div>
+        </div>
+        ${channel.description ? `<p class="channel-description">${escapeHtml(channel.description)}</p>` : ""}
+        <div class="channel-actions">
+          <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe-channel">${subscribed ? "Subscribed" : "Subscribe"}</button>
+          <button class="text-button" type="button" data-action="refresh-channel">Refresh</button>
+        </div>
+      </section>
+      <div class="channel-tabs" aria-label="Channel videos">
+        ${channelTab("latest", "Latest")}
+        ${channelTab("popular", "Popular")}
+      </div>
+      ${state.channelLoading ? renderChannelLoader() : renderVideoList(videos, "channel")}
+    </section>
+  `;
+}
+
+function activeChannel() {
+  return state.channelCacheById[state.activeChannelId]
+    || state.recentChannels.find((channel) => channel.id === state.activeChannelId)
+    || demoChannels.find((channel) => channel.id === state.activeChannelId)
+    || channelFromVideo(findVideoByChannel(state.activeChannelId));
+}
+
+function sortedChannelVideos(channelId) {
+  const videos = [...(state.channelVideosById[channelId] || [])];
+  if (state.channelSort === "popular") {
+    return videos.sort((a, b) => (b.viewCountNumber || 0) - (a.viewCountNumber || 0));
+  }
+  return videos.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+}
+
+function channelTab(value, label) {
+  const active = state.channelSort === value ? " active" : "";
+  return `<button class="chip${active}" type="button" data-action="channel-sort" data-sort="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+}
+
+function renderChannelLoader() {
+  return `
+    <section class="feed-loader channel-loader" role="status" aria-label="Loading channel">
+      <span class="yt-spinner" aria-hidden="true"></span>
+      <article class="video-row skeleton-card">
+        <div class="thumb-button skeleton-box"></div>
+        <div class="video-copy">
+          <span class="channel-avatar skeleton-box"></span>
+          <span>
+            <strong class="skeleton-line wide"></strong>
+            <small class="skeleton-line"></small>
+          </span>
+        </div>
+      </article>
     </section>
   `;
 }
@@ -1941,8 +2283,8 @@ function renderYou() {
         </div>
         <button class="text-button" type="button" data-action="${profile ? "signout" : "signin"}">${profile ? "Sign out" : "Sign in"}</button>
       </section>
-      ${renderHomeScreenCard()}
-      ${renderSetupStatus()}
+      ${state.config.youtubeApiKey && state.config.googleOAuthClientId ? "" : renderSetupStatus()}
+      ${renderRecentChannelsRail()}
       <section class="library-block">
         <div class="section-head">
           <h2>History</h2>
@@ -2004,6 +2346,7 @@ function renderVideoList(videos, source) {
 function renderVideoRow(video, source) {
   const saved = state.savedIds.has(video.id);
   const watched = state.localHistory.some((item) => item.id === video.id);
+  const reason = videoFeedReason(video, source);
   const stateClass = [
     saved ? "is-saved" : "",
     watched ? "is-watched" : "",
@@ -2017,16 +2360,37 @@ function renderVideoRow(video, source) {
         ${watched ? `<span class="watch-progress" aria-hidden="true"></span>` : ""}
         ${video.duration ? `<span class="duration">${escapeHtml(video.duration)}</span>` : ""}
       </button>
-      <button class="video-copy" type="button" data-action="watch" data-video-id="${escapeHtml(video.id)}" data-source="${escapeHtml(source)}">
-        ${renderChannelAvatar(video)}
-        <span>
-          <strong>${escapeHtml(video.title)}</strong>
-          <small>${escapeHtml(videoMeta(video))}</small>
+      <div class="video-copy">
+        <button class="channel-avatar-button" type="button" data-action="open-channel" data-channel-id="${escapeHtml(video.channelId)}" aria-label="${escapeHtml(video.channelTitle)} channel">
+          ${renderChannelAvatar(video)}
+        </button>
+        <span class="video-text">
+          ${reason ? `<em class="feed-reason">${escapeHtml(reason)}</em>` : ""}
+          <button class="video-title-button" type="button" data-action="watch" data-video-id="${escapeHtml(video.id)}" data-source="${escapeHtml(source)}">
+            <strong>${escapeHtml(video.title)}</strong>
+          </button>
+          <span class="video-meta-line">
+            <button class="channel-name-button" type="button" data-action="open-channel" data-channel-id="${escapeHtml(video.channelId)}">${escapeHtml(video.channelTitle)}</button>
+            <small>${escapeHtml(videoStatsMeta(video))}</small>
+          </span>
         </span>
-      </button>
+      </div>
       <button class="kebab" type="button" data-action="sheet" data-sheet="row-more" data-video-id="${escapeHtml(video.id)}" aria-label="More">${icon("more")}</button>
     </article>
   `;
+}
+
+function videoFeedReason(video, source) {
+  if (source === "channel") {
+    return "From this channel";
+  }
+  if (source === "subscriptions") {
+    return "From your channels";
+  }
+  if (source === "home") {
+    return state.feedReasonsById[video.id] || feedReasonForSource(video, "popular");
+  }
+  return "";
 }
 
 function channelAvatarFor(video) {
@@ -2042,6 +2406,14 @@ function renderChannelAvatar(video, size = "") {
   }
 
   return `<span class="${className} fallback" aria-hidden="true">${escapeHtml(channelInitial(video.channelTitle))}</span>`;
+}
+
+function renderChannelImage(channel, size = "") {
+  const className = `channel-avatar${size ? ` ${size}` : ""}`;
+  if (channel?.thumbnailUrl) {
+    return `<img class="${className}" src="${escapeHtml(channel.thumbnailUrl)}" alt="" loading="lazy" />`;
+  }
+  return `<span class="${className} fallback" aria-hidden="true">${escapeHtml(channelInitial(channel?.title))}</span>`;
 }
 
 function channelInitial(title = "") {
@@ -2071,6 +2443,7 @@ function navButton(view, label, iconName) {
 
 function icon(name) {
   const icons = {
+    back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11v2H8.8l4.6 4.6L12 19 5 12l7-7 1.4 1.4L8.8 11H20Z"/></svg>',
     bell: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.6 2.6 0 0 0 2.45-1.75h-4.9A2.6 2.6 0 0 0 12 22Zm7-6.5V11a7 7 0 0 0-5.2-6.77V3a1.8 1.8 0 1 0-3.6 0v1.23A7 7 0 0 0 5 11v4.5l-1.7 2.27A.75.75 0 0 0 3.9 19h16.2a.75.75 0 0 0 .6-1.23L19 15.5ZM7 11a5 5 0 0 1 10 0v5.17l.62.83H6.38L7 16.17V11Z"/></svg>',
     cast: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5V5.25A2.25 2.25 0 0 1 5.25 3h13.5A2.25 2.25 0 0 1 21 5.25v13.5A2.25 2.25 0 0 1 18.75 21H16.5v-2h2.25a.25.25 0 0 0 .25-.25V5.25a.25.25 0 0 0-.25-.25H5.25a.25.25 0 0 0-.25.25V7.5H3Zm0 10.25v-2.1A5.35 5.35 0 0 1 8.35 21h2.1v-2h-2.1A3.35 3.35 0 0 0 5 15.65v-2.2A5.55 5.55 0 0 1 10.55 19H13v-2h-2.45A7.55 7.55 0 0 0 3 9.45v2.1A5.45 5.45 0 0 1 8.45 17H13v-2H8.45A3.45 3.45 0 0 0 5 11.55v6.2H3Z"/></svg>',
     check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.2 16.6-4.1-4.1-1.4 1.4 5.5 5.5L21 7.6 19.6 6 9.2 16.6Z"/></svg>',
@@ -2276,6 +2649,12 @@ function queueForSource(source) {
   if (source === "liked") {
     return state.likedVideos;
   }
+  if (source === "subscriptions") {
+    return state.subscriptionVideos;
+  }
+  if (source === "channel") {
+    return sortedChannelVideos(state.activeChannelId);
+  }
   if (source === "queue") {
     return state.queue;
   }
@@ -2371,6 +2750,16 @@ app.addEventListener("click", async (event) => {
   if (action === "refresh-subs") {
     await loadSubscriptionsAndFeed();
   }
+  if (action === "refresh-channel") {
+    await loadActiveChannel({ refresh: true });
+  }
+  if (action === "channel-sort") {
+    state.channelSort = target.dataset.sort || "latest";
+    render();
+  }
+  if (action === "subscribe-channel") {
+    await subscribeToActiveChannel(state.activeChannelId);
+  }
   if (action === "quick-search") {
     state.view = "search";
     await runSearch(target.dataset.query);
@@ -2379,7 +2768,7 @@ app.addEventListener("click", async (event) => {
     handleSheet(target.dataset.sheet, target.dataset.videoId);
   }
   if (action === "open-channel") {
-    window.open(`https://www.youtube.com/channel/${encodeURIComponent(target.dataset.channelId)}`, "_blank", "noopener,noreferrer");
+    openChannel(target.dataset.channelId);
   }
 });
 
@@ -2415,8 +2804,9 @@ function handleSheet(sheet, videoId) {
   }
   if (sheet === "row-more" || sheet === "video-more") {
     openSheet(video.title, "Choose where to continue this video.", [
+      { label: state.savedIds.has(video.id) ? "Remove saved" : "Save", action: () => { toggleSaved(video.id); closeSheet(); } },
+      { label: "Open channel", action: () => { closeSheet(); openChannel(video.channelId); } },
       { label: "Open in YouTube", href: `${WATCH_BASE}?v=${encodeURIComponent(video.id)}` },
-      { label: state.savedIds.has(video.id) ? "Remove saved" : "Save", action: () => toggleSaved(video.id) },
       { label: "Close", action: closeSheet },
     ]);
   }
