@@ -1566,7 +1566,7 @@ function render() {
   app.innerHTML = `
     ${renderTopbar()}
     ${state.loading ? `<div class="loading-bar"><span>${escapeHtml(state.loading)}</span></div>` : ""}
-    <section class="screen">${renderView()}</section>
+    <section class="screen screen-${escapeHtml(state.view)}">${renderView()}</section>
     ${renderBottomNav()}
   `;
 
@@ -1693,9 +1693,23 @@ function renderHome() {
 }
 
 function renderFeedLoader() {
+  const skeletons = Array.from({ length: 4 }, (_, index) => `
+    <article class="video-row skeleton-card" style="--item-index: ${index};">
+      <div class="thumb-button skeleton-box"></div>
+      <div class="video-copy">
+        <span class="channel-avatar skeleton-box"></span>
+        <span>
+          <strong class="skeleton-line wide"></strong>
+          <small class="skeleton-line"></small>
+        </span>
+      </div>
+    </article>
+  `).join("");
+
   return `
     <section class="feed-loader" role="status" aria-label="Loading feed">
       <span class="yt-spinner" aria-hidden="true"></span>
+      ${skeletons}
     </section>
   `;
 }
@@ -1810,9 +1824,9 @@ function renderWatch() {
           <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe">${subscribed ? "Subscribed" : "Subscribe"}</button>
         </div>
         <div class="action-row" aria-label="Video actions">
-          ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb")}
+          ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
           ${actionPill("replay", "Replay", "replay")}
-          ${actionPill("save", saved ? "Saved" : "Save", saved ? "check" : "plus")}
+          ${actionPill("save", saved ? "Saved" : "Save", saved ? "check" : "plus", saved, true)}
           ${actionPill("share", "Share", "share")}
           <a class="action-pill" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${icon("external")}<span>YouTube</span></a>
         </div>
@@ -1836,8 +1850,9 @@ function renderWatch() {
   `;
 }
 
-function actionPill(action, label, iconName) {
-  return `<button class="action-pill" type="button" data-action="${escapeHtml(action)}">${icon(iconName)}<span>${escapeHtml(label)}</span></button>`;
+function actionPill(action, label, iconName, active = false, toggle = false) {
+  const pressed = toggle ? ` aria-pressed="${active ? "true" : "false"}"` : "";
+  return `<button class="action-pill${active ? " active" : ""}" type="button" data-action="${escapeHtml(action)}"${pressed}>${icon(iconName)}<span>${escapeHtml(label)}</span></button>`;
 }
 
 function renderDescription(video) {
@@ -1856,7 +1871,7 @@ function renderDescription(video) {
 
 function renderComments() {
   if (!state.comments.length) {
-    return `<p class="empty-text">Comments load from YouTube when API access is available.</p>`;
+    return `<p class="empty-text comments-empty">Comments load from YouTube when API access is available.</p>`;
   }
 
   return `
@@ -1987,10 +2002,19 @@ function renderVideoList(videos, source) {
 }
 
 function renderVideoRow(video, source) {
+  const saved = state.savedIds.has(video.id);
+  const watched = state.localHistory.some((item) => item.id === video.id);
+  const stateClass = [
+    saved ? "is-saved" : "",
+    watched ? "is-watched" : "",
+  ].filter(Boolean).join(" ");
+
   return `
-    <article class="video-row">
+    <article class="video-row ${stateClass}">
       <button class="thumb-button" type="button" data-action="watch" data-video-id="${escapeHtml(video.id)}" data-source="${escapeHtml(source)}">
         <img src="${escapeHtml(video.thumbnailUrl)}" alt="" loading="lazy" />
+        ${saved ? `<span class="saved-badge">${icon("check")}Saved</span>` : ""}
+        ${watched ? `<span class="watch-progress" aria-hidden="true"></span>` : ""}
         ${video.duration ? `<span class="duration">${escapeHtml(video.duration)}</span>` : ""}
       </button>
       <button class="video-copy" type="button" data-action="watch" data-video-id="${escapeHtml(video.id)}" data-source="${escapeHtml(source)}">
