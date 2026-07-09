@@ -104,8 +104,6 @@ const state = {
   localHistory: readJson("yt_history", []),
   searchHistory: readJson("yt_search_history", []),
   onboarded: readJson("yt_onboarded", false),
-  orientationLockActive: false,
-  orientationFallbackActive: false,
   fullscreenControlsTimer: 0,
   fullscreenControlsHidden: false,
   installIntroDone: readJson("yt_install_intro_done", false),
@@ -2116,62 +2114,18 @@ async function togglePlayerFullscreen() {
 
   if (fullscreen) {
     showPlayerFullscreenControls();
-    state.orientationLockActive = await lockLandscapeOrientation();
-    state.orientationFallbackActive = !state.orientationLockActive;
-    syncPlayerFullscreenOrientation();
     return;
   }
 
-  shell.classList.remove("landscape-fallback");
   clearPlayerFullscreenControlsTimer();
-  unlockLandscapeOrientation();
-  state.orientationLockActive = false;
-  state.orientationFallbackActive = false;
-  syncPlayerFullscreenOrientation();
 }
 
 function closePlayerFullscreen() {
-  document.querySelector(".player-shell.app-fullscreen")?.classList.remove("app-fullscreen", "landscape-fallback");
+  document.querySelector(".player-shell.app-fullscreen")?.classList.remove("app-fullscreen");
   document.documentElement.classList.remove("player-fullscreen-open");
   document.body.classList.remove("player-fullscreen-open");
   clearPlayerFullscreenControlsTimer();
-  unlockLandscapeOrientation();
-  state.orientationLockActive = false;
-  state.orientationFallbackActive = false;
   setFullscreenButtonState(false);
-}
-
-async function lockLandscapeOrientation() {
-  try {
-    if (screen.orientation?.lock) {
-      await screen.orientation.lock("landscape");
-      return true;
-    }
-  } catch {
-    // Some mobile browsers only allow CSS-based rotation from web apps.
-  }
-  return false;
-}
-
-function unlockLandscapeOrientation() {
-  try {
-    screen.orientation?.unlock?.();
-  } catch {
-    // Unlock is best-effort and may be unavailable on iOS.
-  }
-}
-
-function syncPlayerFullscreenOrientation() {
-  const shell = document.querySelector(".player-shell.app-fullscreen");
-  if (!shell) {
-    return;
-  }
-
-  shell.classList.toggle("landscape-fallback", state.orientationFallbackActive && isPortraitViewport());
-}
-
-function isPortraitViewport() {
-  return window.matchMedia?.("(orientation: portrait)")?.matches ?? window.innerHeight > window.innerWidth;
 }
 
 function setFullscreenButtonState(fullscreen) {
@@ -2399,9 +2353,6 @@ document.addEventListener("keydown", (event) => {
     closePlayerFullscreen();
   }
 });
-
-window.addEventListener("resize", syncPlayerFullscreenOrientation);
-window.addEventListener("orientationchange", syncPlayerFullscreenOrientation);
 
 function handleSheet(sheet, videoId) {
   const video = videoId ? findVideo(videoId) : currentVideo();

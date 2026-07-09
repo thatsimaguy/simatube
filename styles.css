@@ -808,24 +808,6 @@ svg {
   background: #000;
 }
 
-.player-shell.app-fullscreen.landscape-fallback {
-  left: 50%;
-  top: 50%;
-  right: auto;
-  bottom: auto;
-  width: 100vh;
-  height: 100vw;
-  transform: translate(-50%, -50%) rotate(90deg);
-  transform-origin: center;
-}
-
-@supports (width: 100dvh) {
-  .player-shell.app-fullscreen.landscape-fallback {
-    width: 100dvh;
-    height: 100dvw;
-  }
-}
-
 #playerMount,
 #playerMount iframe,
 .poster-button,
