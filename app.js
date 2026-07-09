@@ -1757,10 +1757,6 @@ function renderWatch() {
     <section class="watch-view">
       <div class="player-shell">
         <div id="playerMount"></div>
-        <button class="player-fullscreen-button" type="button" data-action="player-fullscreen" aria-label="Fullscreen player">
-          <span class="fullscreen-enter">${icon("fullscreen")}</span>
-          <span class="fullscreen-exit">${icon("close")}</span>
-        </button>
         <button class="poster-button" type="button" data-action="play" aria-label="Play video">
           <img src="${escapeHtml(video.thumbnailUrl)}" alt="" />
           <span class="big-play" aria-hidden="true"></span>
@@ -1777,7 +1773,13 @@ function renderWatch() {
       <section class="watch-detail">
         <div class="title-row">
           <h1>${escapeHtml(video.title)}</h1>
-          <button class="kebab" type="button" data-action="sheet" data-sheet="video-more" aria-label="More">${icon("more")}</button>
+          <div class="title-actions">
+            <button class="player-fullscreen-button" type="button" data-action="player-fullscreen" aria-label="Fullscreen player">
+              <span class="fullscreen-enter">${icon("fullscreen")}</span>
+              <span class="fullscreen-exit">${icon("close")}</span>
+            </button>
+            <button class="kebab" type="button" data-action="sheet" data-sheet="video-more" aria-label="More">${icon("more")}</button>
+          </div>
         </div>
         <p class="stats-line">${escapeHtml([video.viewCount ? `${video.viewCount} views` : "", timeAgo(video.publishedAt)].filter(Boolean).join(" • "))}</p>
         <div class="channel-row">
@@ -2110,8 +2112,7 @@ async function togglePlayerFullscreen() {
   shell.classList.toggle("app-fullscreen", fullscreen);
   document.documentElement.classList.toggle("player-fullscreen-open", fullscreen);
   document.body.classList.toggle("player-fullscreen-open", fullscreen);
-  shell.querySelector(".player-fullscreen-button")
-    ?.setAttribute("aria-label", fullscreen ? "Exit fullscreen player" : "Fullscreen player");
+  setFullscreenButtonState(fullscreen);
 
   if (fullscreen) {
     state.orientationLockActive = await lockLandscapeOrientation();
@@ -2134,6 +2135,7 @@ function closePlayerFullscreen() {
   unlockLandscapeOrientation();
   state.orientationLockActive = false;
   state.orientationFallbackActive = false;
+  setFullscreenButtonState(false);
 }
 
 async function lockLandscapeOrientation() {
@@ -2167,6 +2169,12 @@ function syncPlayerFullscreenOrientation() {
 
 function isPortraitViewport() {
   return window.matchMedia?.("(orientation: portrait)")?.matches ?? window.innerHeight > window.innerWidth;
+}
+
+function setFullscreenButtonState(fullscreen) {
+  document.querySelectorAll(".player-fullscreen-button").forEach((button) => {
+    button.setAttribute("aria-label", fullscreen ? "Exit fullscreen player" : "Fullscreen player");
+  });
 }
 
 function playActive() {
