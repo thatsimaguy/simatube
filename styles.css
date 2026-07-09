@@ -107,7 +107,7 @@ label:focus-visible {
   background: linear-gradient(180deg, #050505 0, var(--bg) 160px);
   position: relative;
   overflow-x: hidden;
-  padding-bottom: calc(84px + var(--safe-bottom));
+  padding-bottom: calc(76px + var(--safe-bottom));
 }
 
 .topbar {
@@ -1721,8 +1721,8 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   z-index: 35;
   width: min(100%, 430px);
   margin: 0 auto;
-  height: calc(72px + var(--safe-bottom));
-  padding: 6px 12px calc(8px + var(--safe-bottom));
+  height: calc(64px + var(--safe-bottom));
+  padding: 5px 10px calc(6px + var(--safe-bottom));
   justify-content: space-between;
   border-top: 1px solid rgba(255, 255, 255, .09);
   background: rgba(0, 0, 0, .9);
@@ -1731,19 +1731,19 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
 }
 
 .nav-item {
-  width: 70px;
-  height: 58px;
-  border-radius: 14px;
-  gap: 3px;
+  width: 64px;
+  height: 52px;
+  border-radius: 12px;
+  gap: 2px;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 14px;
+  font-size: 10px;
+  line-height: 13px;
   position: relative;
 }
 
 .nav-item svg {
-  width: 23px;
-  height: 23px;
+  width: 22px;
+  height: 22px;
 }
 
 .nav-item span {
@@ -1752,7 +1752,7 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
 
 .nav-item.active {
   color: #fff;
-  background: rgba(255, 255, 255, .08);
+  background: transparent;
   animation: active-pop 220ms ease both;
 }
 
@@ -1761,7 +1761,7 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   position: absolute;
   left: 50%;
   top: 5px;
-  width: 18px;
+  width: 16px;
   height: 3px;
   border-radius: 999px;
   background: var(--red);
@@ -1909,7 +1909,7 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   }
 
   .nav-item {
-    width: 62px;
+    width: 56px;
   }
 }
 
