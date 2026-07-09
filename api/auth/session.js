@@ -2,12 +2,18 @@ const {
   clearAuthCookies,
   getConfig,
   getSession,
+  methodNotAllowed,
   refreshSession,
   sendJson,
   setSessionCookie,
 } = require("./_shared");
 
 module.exports = async function handler(req, res) {
+  if (req.method !== "GET") {
+    methodNotAllowed(res, ["GET"]);
+    return;
+  }
+
   const config = getConfig(req);
 
   if (!config.configured) {

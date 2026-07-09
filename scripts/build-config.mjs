@@ -12,14 +12,21 @@ const files = [
   "apple-touch-icon.png",
   "service-worker.js",
 ];
+const googleOAuthClientId = process.env.GOOGLE_OAUTH_CLIENT_ID || "";
+const googleOAuthClientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+
+function numberFromEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 const config = {
   youtubeApiKey: process.env.YOUTUBE_API_KEY || "",
-  googleOAuthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || "",
-  serverOAuthEnabled: Boolean(process.env.GOOGLE_OAUTH_CLIENT_SECRET),
+  googleOAuthClientId,
+  serverOAuthEnabled: Boolean(googleOAuthClientId && googleOAuthClientSecret),
   regionCode: process.env.YOUTUBE_REGION_CODE || "US",
-  maxSubscriptionChannels: Number(process.env.YOUTUBE_MAX_SUBSCRIPTION_CHANNELS || 50),
-  uploadsPerChannel: Number(process.env.YOUTUBE_UPLOADS_PER_CHANNEL || 2),
+  maxSubscriptionChannels: numberFromEnv("YOUTUBE_MAX_SUBSCRIPTION_CHANNELS", 50),
+  uploadsPerChannel: numberFromEnv("YOUTUBE_UPLOADS_PER_CHANNEL", 2),
 };
 
 await rm(dist, { recursive: true, force: true, maxRetries: 3, retryDelay: 120 });

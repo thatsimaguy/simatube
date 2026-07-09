@@ -6,6 +6,7 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SESSION_COOKIE = "yt_server_session";
 const STATE_COOKIE = "yt_oauth_state";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 60;
+const TOKEN_REQUEST_TIMEOUT_MS = 10000;
 
 function getConfig(req) {
   const origin = getOrigin(req);
@@ -22,9 +23,22 @@ function getConfig(req) {
 }
 
 function getOrigin(req) {
-  const proto = req.headers["x-forwarded-proto"] || "https";
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"]);
+  const proto = forwardedProto === "http" || forwardedProto === "https" ? forwardedProto : "https";
+  const host = firstHeaderValue(req.headers["x-forwarded-host"] || req.headers.host) || "localhost";
   return `${proto}://${host}`;
+}
+
+function firstHeaderValue(value) {
+  return String(value || "").split(",", 1)[0].trim();
+}
+
+function decodeCookieValue(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function parseCookies(req) {
@@ -37,13 +51,14 @@ function parseCookies(req) {
         const index = part.indexOf("=");
         return index === -1
           ? [part, ""]
-          : [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+          : [part.slice(0, index), decodeCookieValue(part.slice(index + 1))];
       }),
   );
 }
 
 function secureCookie(req) {
-  return req.headers["x-forwarded-proto"] === "https" || /vercel\.app$/i.test(req.headers.host || "");
+  return firstHeaderValue(req.headers["x-forwarded-proto"]) === "https"
+    || /vercel\.app$/i.test(firstHeaderValue(req.headers.host));
 }
 
 function serializeCookie(req, name, value, options = {}) {
@@ -135,20 +150,40 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function methodNotAllowed(res, allowedMethods) {
+  res.setHeader("Allow", allowedMethods.join(", "));
+  sendJson(res, 405, { error: "Method not allowed." });
+}
+
 function redirect(res, location) {
   res.statusCode = 302;
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Location", location);
   res.end();
 }
 
 async function postToken(body) {
-  const response = await fetch(GOOGLE_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams(body),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TOKEN_REQUEST_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(GOOGLE_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Google sign-in took too long. Try again.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
@@ -188,16 +223,16 @@ async function refreshSession(config, session) {
 
   return {
     ...session,
-    ...normalizeTokenPayload(payload),
+    ...normalizeTokenPayload(payload, session.scope || READ_SCOPE),
     refresh_token: payload.refresh_token || session.refresh_token,
   };
 }
 
-function normalizeTokenPayload(payload) {
+function normalizeTokenPayload(payload, fallbackScope = READ_SCOPE) {
   return {
     access_token: payload.access_token || "",
     refresh_token: payload.refresh_token || "",
-    scope: payload.scope || READ_SCOPE,
+    scope: payload.scope || fallbackScope,
     token_type: payload.token_type || "Bearer",
     expires_at: Date.now() + Number(payload.expires_in || 3600) * 1000,
   };
@@ -213,6 +248,7 @@ module.exports = {
   getConfig,
   getOrigin,
   getSession,
+  methodNotAllowed,
   parseCookies,
   redirect,
   refreshSession,

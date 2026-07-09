@@ -27,7 +27,7 @@ npm run verify
 npm run deploy
 ```
 
-`npm run verify` checks the browser code and rebuilds the production `dist` folder.
+`npm run verify` checks the browser and OAuth code, runs the auth regression suite, and rebuilds the production `dist` folder.
 
 For a quick local server:
 
@@ -55,6 +55,12 @@ Production env vars already configured in Vercel:
 YOUTUBE_API_KEY
 GOOGLE_OAUTH_CLIENT_ID
 GOOGLE_OAUTH_CLIENT_SECRET
+```
+
+Optional hardening variable (the client secret is used as a fallback when this is absent):
+
+```text
+AUTH_COOKIE_SECRET
 ```
 
 The app uses server OAuth so Safari can stay signed in through a secure HTTP-only cookie.

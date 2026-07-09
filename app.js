@@ -11,6 +11,8 @@ const SUBSCRIPTION_PLAYLIST_TIMEOUT_MS = 9000;
 const RECOVERY_SUBSCRIPTION_UPLOAD_CHANNELS = 6;
 const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
+const PLAYER_API_TIMEOUT_MS = 12000;
+const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const CACHE_CLEANUP_VERSION = "2026-07-v3";
 const INITIAL_VIDEO_ROWS = 16;
 const VIDEO_ROWS_INCREMENT = 12;
@@ -96,6 +98,8 @@ const app = document.querySelector("#app");
 const sheetRoot = document.querySelector("#sheet-root");
 const toast = document.querySelector("#toast");
 const recoveringFromFastReload = beginBootGuard();
+let googleIdentityLoadPromise = null;
+let pendingRenderFocus = null;
 
 const state = {
   view: recoveringFromFastReload ? "home" : sanitizeView(readJson("yt_last_view", "home")),
@@ -163,6 +167,7 @@ const state = {
   playerReady: false,
   playerError: null,
   ytApiReady: false,
+  playerApiLoadTimer: 0,
 };
 
 cacheVideos(state.localHistory);
@@ -177,6 +182,7 @@ window.addEventListener("pagehide", (event) => {
     state.player?.pauseVideo?.();
     return;
   }
+  clearPlayerApiLoadTimer();
   destroyPlayer();
 });
 window.addEventListener("pageshow", (event) => {
@@ -215,15 +221,13 @@ function boot() {
     history.scrollRestoration = "manual";
   }
   window.onYouTubeIframeAPIReady = () => {
+    clearPlayerApiLoadTimer();
     state.ytApiReady = true;
     if (state.view === "watch") {
       mountPlayer(state.pendingAutoplayVideoId === state.activeVideoId);
     }
   };
 
-  if (state.view === "watch") {
-    loadYouTubeIframeApi();
-  }
   state.feedLoading = shouldLoadInitialFeed();
   state.homeFeed = state.demoMode ? demoVideos : [];
   state.queue = state.homeFeed;
@@ -528,6 +532,7 @@ function clampNumber(value, min, max, fallback) {
 
 function loadYouTubeIframeApi() {
   if (window.YT?.Player) {
+    clearPlayerApiLoadTimer();
     state.ytApiReady = true;
     if (state.view === "watch" && state.pendingAutoplayVideoId === state.activeVideoId) {
       window.requestAnimationFrame(() => mountPlayer(true));
@@ -543,15 +548,53 @@ function loadYouTubeIframeApi() {
   script.src = "https://www.youtube.com/iframe_api";
   script.dataset.simatubePlayerApi = "";
   script.async = true;
-  script.onerror = () => {
-    script.remove();
-    state.pendingAutoplayVideoId = "";
-    const poster = document.querySelector(".poster-button");
-    poster?.classList.remove("is-loading");
-    poster?.removeAttribute("aria-busy");
-    showToast("The player could not load. Tap to try again.");
-  };
+  script.onerror = () => failPlayerApiLoad(script);
   document.head.append(script);
+  clearPlayerApiLoadTimer();
+  state.playerApiLoadTimer = window.setTimeout(
+    () => failPlayerApiLoad(script),
+    PLAYER_API_TIMEOUT_MS,
+  );
+}
+
+function clearPlayerApiLoadTimer() {
+  window.clearTimeout(state.playerApiLoadTimer);
+  state.playerApiLoadTimer = 0;
+}
+
+function failPlayerApiLoad(script) {
+  if (script.dataset.simatubeFailed === "true") {
+    return;
+  }
+  if (window.YT?.Player) {
+    clearPlayerApiLoadTimer();
+    state.ytApiReady = true;
+    if (state.view === "watch" && state.pendingAutoplayVideoId === state.activeVideoId) {
+      window.requestAnimationFrame(() => mountPlayer(true));
+    }
+    return;
+  }
+  script.dataset.simatubeFailed = "true";
+  script.remove();
+  clearPlayerApiLoadTimer();
+  state.ytApiReady = false;
+  state.pendingAutoplayVideoId = "";
+  const poster = document.querySelector(".poster-button");
+  poster?.classList.remove("is-loading");
+  poster?.removeAttribute("aria-busy");
+  showToast("The player could not load. Tap to try again.");
+}
+
+function cancelPendingPlayerApiLoad() {
+  clearPlayerApiLoadTimer();
+  if (!window.YT?.Player) {
+    const script = document.querySelector('script[data-simatube-player-api]');
+    if (script) {
+      script.dataset.simatubeFailed = "true";
+      script.remove();
+    }
+    state.ytApiReady = false;
+  }
 }
 
 async function clearOldServiceWorkers() {
@@ -579,23 +622,40 @@ function loadGoogleIdentity() {
   if (window.google?.accounts?.oauth2) {
     return Promise.resolve();
   }
+  if (googleIdentityLoadPromise) {
+    return googleIdentityLoadPromise;
+  }
 
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
-    if (existing) {
-      existing.addEventListener("load", resolve, { once: true });
-      existing.addEventListener("error", reject, { once: true });
-      return;
-    }
-
+  document.querySelector('script[src="https://accounts.google.com/gsi/client"]')?.remove();
+  googleIdentityLoadPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = "https://accounts.google.com/gsi/client";
     script.async = true;
     script.defer = true;
-    script.onload = resolve;
-    script.onerror = reject;
+    const timeoutId = window.setTimeout(() => {
+      script.remove();
+      googleIdentityLoadPromise = null;
+      reject(new Error("Google sign-in took too long to load."));
+    }, GOOGLE_IDENTITY_TIMEOUT_MS);
+    script.onload = () => {
+      window.clearTimeout(timeoutId);
+      googleIdentityLoadPromise = null;
+      if (window.google?.accounts?.oauth2) {
+        resolve();
+        return;
+      }
+      script.remove();
+      reject(new Error("Google sign-in is unavailable right now."));
+    };
+    script.onerror = () => {
+      window.clearTimeout(timeoutId);
+      script.remove();
+      googleIdentityLoadPromise = null;
+      reject(new Error("Google sign-in could not load."));
+    };
     document.head.append(script);
   });
+  return googleIdentityLoadPromise;
 }
 
 async function requestToken(scopes, options = {}) {
@@ -642,7 +702,8 @@ async function requestToken(scopes, options = {}) {
         }
 
         state.auth.accessToken = response.access_token;
-        scope.split(" ").forEach((item) => state.auth.scopes.add(item));
+        String(response.scope || scope).split(" ").filter(Boolean)
+          .forEach((item) => state.auth.scopes.add(item));
         finish(resolve, response.access_token);
       },
     });
@@ -813,6 +874,7 @@ async function signIn() {
 }
 
 async function signOut() {
+  cancelPendingPlayerApiLoad();
   state.authVersion += 1;
   state.searchLoadVersion += 1;
   state.commentsLoadVersion += 1;
@@ -858,6 +920,7 @@ function continueDemo() {
   state.homeFeed = demoVideos;
   state.queue = demoVideos;
   state.view = "home";
+  cancelPendingPlayerApiLoad();
   writeJson("yt_onboarded", true);
   writeJson("yt_demo_mode", true);
   writeJson("yt_remember_youtube_signin", false);
@@ -1412,7 +1475,11 @@ function ageInDays(dateValue) {
   if (!dateValue) {
     return 365;
   }
-  return Math.max(0, (Date.now() - new Date(dateValue).getTime()) / 86_400_000);
+  const timestamp = new Date(dateValue).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return 365;
+  }
+  return Math.max(0, (Date.now() - timestamp) / 86_400_000);
 }
 
 function stableDailyJitter(id = "") {
@@ -1972,14 +2039,15 @@ function formatDuration(isoDuration = "") {
 }
 
 function parseDurationSeconds(isoDuration = "") {
-  const match = String(isoDuration).match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  const match = String(isoDuration).match(/P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) {
     return 0;
   }
 
-  return Number(match[1] || 0) * 3600
-    + Number(match[2] || 0) * 60
-    + Number(match[3] || 0);
+  return Number(match[1] || 0) * 86_400
+    + Number(match[2] || 0) * 3600
+    + Number(match[3] || 0) * 60
+    + Number(match[4] || 0);
 }
 
 function formatCount(value) {
@@ -2009,7 +2077,11 @@ function timeAgo(dateValue) {
     return "";
   }
 
-  const seconds = Math.max(1, Math.floor((Date.now() - new Date(dateValue).getTime()) / 1000));
+  const timestamp = new Date(dateValue).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return "";
+  }
+  const seconds = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
   const units = [
     ["year", 31_536_000],
     ["month", 2_592_000],
@@ -2185,9 +2257,17 @@ function openWatch(videoId, queue = [], options = {}) {
   }
 
   const changed = state.view !== "watch" || state.activeVideoId !== videoId;
-  closePlayerFullscreen();
-  if (state.pendingAutoplayVideoId && state.pendingAutoplayVideoId !== videoId) {
+  const preserveFullscreen = Boolean(options.preserveFullscreen && isPlayerFullscreen());
+  if (preserveFullscreen) {
+    clearPlayerFullscreenControlsTimer();
+  } else {
+    closePlayerFullscreen();
+  }
+  if (options.autoplay) {
+    state.pendingAutoplayVideoId = videoId;
+  } else if (state.pendingAutoplayVideoId && state.pendingAutoplayVideoId !== videoId) {
     state.pendingAutoplayVideoId = "";
+    cancelPendingPlayerApiLoad();
   }
   state.activeVideoId = videoId;
   state.queue = queue.length ? queue : state.homeFeed;
@@ -2200,11 +2280,16 @@ function openWatch(videoId, queue = [], options = {}) {
   if (options.remember !== false) {
     addHistory(video);
   }
-  loadYouTubeIframeApi();
   if (changed) {
     updateNavigationHistory(options);
   }
   render();
+  if (preserveFullscreen) {
+    restorePlayerFullscreen();
+  }
+  if (options.autoplay && (!state.ytApiReady || !window.YT?.Player)) {
+    loadYouTubeIframeApi();
+  }
   resetScroll();
 }
 
@@ -2214,6 +2299,7 @@ function openChannel(channelId, options = {}) {
   }
 
   const changed = state.view !== "channel" || state.activeChannelId !== channelId;
+  cancelPendingPlayerApiLoad();
   closePlayerFullscreen();
   state.activeChannelId = channelId;
   state.channelSort = "latest";
@@ -2286,6 +2372,7 @@ function setView(view, options = {}) {
   }
   if (view !== "watch") {
     state.pendingAutoplayVideoId = "";
+    cancelPendingPlayerApiLoad();
     closePlayerFullscreen();
   }
   state.view = view;
@@ -2365,7 +2452,10 @@ function showToast(message) {
 }
 
 function openSheet(title, body, actions = []) {
-  openSheet.lastFocus = document.activeElement;
+  if (!sheetRoot.childElementCount) {
+    openSheet.lastFocus = document.activeElement;
+    openSheet.lastFocusSignature = focusSignature(document.activeElement);
+  }
   const actionHtml = actions.map((action, index) => {
     if (action.href) {
       return `<a class="sheet-action" href="${escapeHtml(action.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(action.label)}</a>`;
@@ -2375,14 +2465,15 @@ function openSheet(title, body, actions = []) {
 
   sheetRoot.innerHTML = `
     <div class="sheet-backdrop" data-action="close-sheet">
-      <section class="bottom-sheet" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
-        <div class="sheet-grip"></div>
-        <h2>${escapeHtml(title)}</h2>
-        <p>${escapeHtml(body)}</p>
+      <section class="bottom-sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" aria-describedby="sheet-body">
+        <div class="sheet-grip" aria-hidden="true"></div>
+        <h2 id="sheet-title">${escapeHtml(title)}</h2>
+        <p id="sheet-body">${escapeHtml(body)}</p>
         <div class="sheet-actions">${actionHtml}</div>
       </section>
     </div>
   `;
+  app.inert = true;
   document.documentElement.classList.add("sheet-open");
   document.body.classList.add("sheet-open");
 
@@ -2399,12 +2490,28 @@ function openSheet(title, body, actions = []) {
 
 function closeSheet(options = {}) {
   sheetRoot.replaceChildren();
+  app.inert = false;
   document.documentElement.classList.remove("sheet-open");
   document.body.classList.remove("sheet-open");
-  if (options.restoreFocus !== false && openSheet.lastFocus?.isConnected) {
-    openSheet.lastFocus.focus();
+  let restored = false;
+  if (options.restoreFocus !== false
+    && openSheet.lastFocus?.isConnected
+    && openSheet.lastFocus !== document.body
+    && openSheet.lastFocus !== app
+    && !openSheet.lastFocus.disabled) {
+    openSheet.lastFocus.focus({ preventScroll: true });
+    pendingRenderFocus = null;
+    restored = true;
+  }
+  if (!restored && options.restoreFocus !== false) {
+    pendingRenderFocus = pendingRenderFocus || openSheet.lastFocusSignature;
+    restoreRenderFocus();
+  }
+  if (options.restoreFocus === false) {
+    pendingRenderFocus = null;
   }
   openSheet.lastFocus = null;
+  openSheet.lastFocusSignature = null;
 }
 
 function setupCopy() {
@@ -2436,21 +2543,28 @@ function shouldShowReconnect() {
 }
 
 function render() {
+  captureRenderFocus();
   if (shouldShowInstallIntro()) {
+    closePlayerFullscreen();
     destroyPlayer();
     app.innerHTML = renderInstallIntro();
+    restoreRenderFocus();
     return;
   }
 
   if (shouldShowReconnect()) {
+    closePlayerFullscreen();
     destroyPlayer();
     app.innerHTML = renderReconnectScreen();
+    restoreRenderFocus();
     return;
   }
 
   if (shouldShowOnboarding()) {
+    closePlayerFullscreen();
     destroyPlayer();
     app.innerHTML = renderOnboarding();
+    restoreRenderFocus();
     return;
   }
 
@@ -2481,6 +2595,73 @@ function render() {
   if (descriptionToggle) {
     descriptionToggle.checked = descriptionExpanded;
   }
+  restoreRenderFocus();
+}
+
+function focusSignature(element) {
+  if (!(element instanceof HTMLElement) || !app.contains(element)) {
+    return null;
+  }
+  if (element.matches("input, textarea, select")) {
+    return {
+      kind: "field",
+      tag: element.tagName,
+      id: element.id,
+      name: element.getAttribute("name") || "",
+      type: element.getAttribute("type") || "",
+    };
+  }
+
+  const control = element.closest("[data-action]");
+  if (!control) {
+    return null;
+  }
+  return {
+    kind: "action",
+    tag: control.tagName,
+    dataset: { ...control.dataset },
+  };
+}
+
+function captureRenderFocus() {
+  const signature = focusSignature(document.activeElement);
+  if (signature) {
+    pendingRenderFocus = signature;
+  }
+}
+
+function restoreRenderFocus() {
+  if (!pendingRenderFocus || sheetRoot.childElementCount) {
+    return false;
+  }
+
+  let candidate = null;
+  if (pendingRenderFocus.kind === "field") {
+    candidate = [...app.querySelectorAll("input, textarea, select")].find((element) => (
+      element.tagName === pendingRenderFocus.tag
+      && element.id === pendingRenderFocus.id
+      && (element.getAttribute("name") || "") === pendingRenderFocus.name
+      && (element.getAttribute("type") || "") === pendingRenderFocus.type
+    ));
+  } else {
+    candidate = [...app.querySelectorAll("[data-action]")].find((element) => (
+      element.tagName === pendingRenderFocus.tag
+      && Object.entries(pendingRenderFocus.dataset)
+        .every(([key, value]) => element.dataset[key] === value)
+    ));
+  }
+
+  if (!candidate) {
+    pendingRenderFocus = null;
+    return false;
+  }
+  if (candidate.disabled) {
+    return false;
+  }
+
+  candidate.focus({ preventScroll: true });
+  pendingRenderFocus = null;
+  return true;
 }
 
 function takeReusablePlayerShell() {
@@ -2607,6 +2788,7 @@ function renderHome() {
   const personalized = Boolean(state.auth.profile);
   return `
     <section class="home-rail">
+      <h1 class="sr-only">Home</h1>
       ${state.demoMode && !personalized ? renderDemoPill() : ""}
       ${state.reconnectFailed && state.rememberSignIn && !personalized ? renderReconnectPill() : ""}
       <div class="chip-row" aria-label="Home filters">
@@ -2623,7 +2805,7 @@ function renderHome() {
 
 function renderFeedLoader() {
   const skeletons = Array.from({ length: 4 }, (_, index) => `
-    <article class="video-row skeleton-card" style="--item-index: ${index};">
+    <article class="video-row skeleton-card" style="--item-index: ${index};" aria-hidden="true">
       <div class="thumb-button skeleton-box"></div>
       <div class="video-copy">
         <span class="channel-avatar skeleton-box"></span>
@@ -2669,6 +2851,7 @@ function filterChip(value, label) {
 function renderSearch() {
   return `
     <section class="search-view">
+      <h1 class="sr-only">Search</h1>
       <form class="search-form" data-action="search-form">
         <label class="search-box">
           ${icon("search")}
@@ -3152,7 +3335,7 @@ function icon(name) {
   return icons[name] || icons.more;
 }
 
-async function mountPlayer(autoplay) {
+function mountPlayer(autoplay) {
   let mount = document.querySelector("#playerMount");
   const video = currentVideo();
   if (!mount || state.playerError || !state.ytApiReady || !window.YT?.Player) {
@@ -3174,42 +3357,52 @@ async function mountPlayer(autoplay) {
 
   state.playerVideoId = video.id;
   let player = null;
-  player = new window.YT.Player(mount, {
-    host: "https://www.youtube-nocookie.com",
-    videoId: video.id,
-    playerVars: {
-      autoplay: autoplay ? 1 : 0,
-      controls: 1,
-      enablejsapi: 1,
-      fs: 0,
-      iv_load_policy: 3,
-      modestbranding: 1,
-      playsinline: 1,
-      rel: 0,
-    },
-    events: {
-      onReady: () => {
-        if (state.player !== player || state.playerVideoId !== video.id) {
-          return;
-        }
-        state.playerReady = true;
-        configurePlayerIframe();
-        if (state.pendingAutoplayVideoId === video.id) {
-          state.pendingAutoplayVideoId = "";
-          document.querySelector(".poster-button")?.setAttribute("hidden", "");
-          player.playVideo?.();
-        }
+  try {
+    player = new window.YT.Player(mount, {
+      host: "https://www.youtube-nocookie.com",
+      videoId: video.id,
+      playerVars: {
+        autoplay: autoplay ? 1 : 0,
+        controls: 1,
+        enablejsapi: 1,
+        fs: 0,
+        iv_load_policy: 3,
+        modestbranding: 1,
+        playsinline: 1,
+        rel: 0,
       },
-      onError: (event) => handlePlayerError(event.data, video.id),
-      onStateChange: (event) => {
-        if (state.player === player
-          && state.playerVideoId === video.id
-          && event.data === window.YT.PlayerState.ENDED) {
-          nextVideo();
-        }
+      events: {
+        onReady: () => {
+          if (state.player !== player || state.playerVideoId !== video.id) {
+            return;
+          }
+          state.playerReady = true;
+          configurePlayerIframe();
+          if (state.pendingAutoplayVideoId === video.id) {
+            state.pendingAutoplayVideoId = "";
+            document.querySelector(".poster-button")?.setAttribute("hidden", "");
+            player.playVideo?.();
+          }
+        },
+        onError: (event) => handlePlayerError(event.data, video.id),
+        onStateChange: (event) => {
+          if (state.player === player
+            && state.playerVideoId === video.id
+            && event.data === window.YT.PlayerState.ENDED) {
+            nextVideo({ autoplay: true, preserveFullscreen: true });
+          }
+        },
       },
-    },
-  });
+    });
+  } catch {
+    state.playerVideoId = "";
+    state.pendingAutoplayVideoId = "";
+    const poster = document.querySelector(".poster-button");
+    poster?.classList.remove("is-loading");
+    poster?.removeAttribute("aria-busy");
+    showToast("The player could not start. Tap to try again.");
+    return;
+  }
   state.player = player;
 }
 
@@ -3242,23 +3435,29 @@ function configurePlayerIframe() {
 }
 
 async function togglePlayerFullscreen() {
+  if (isPlayerFullscreen()) {
+    closePlayerFullscreen();
+    return;
+  }
+  restorePlayerFullscreen();
+}
+
+function isPlayerFullscreen() {
+  return Boolean(document.querySelector(".player-shell.app-fullscreen"));
+}
+
+function restorePlayerFullscreen() {
   const shell = document.querySelector(".player-shell");
   if (!shell) {
+    closePlayerFullscreen();
     return;
   }
 
-  const fullscreen = !shell.classList.contains("app-fullscreen");
-  shell.classList.toggle("app-fullscreen", fullscreen);
-  document.documentElement.classList.toggle("player-fullscreen-open", fullscreen);
-  document.body.classList.toggle("player-fullscreen-open", fullscreen);
-  setFullscreenButtonState(fullscreen);
-
-  if (fullscreen) {
-    showPlayerFullscreenControls();
-    return;
-  }
-
-  clearPlayerFullscreenControlsTimer();
+  shell.classList.add("app-fullscreen");
+  document.documentElement.classList.add("player-fullscreen-open");
+  document.body.classList.add("player-fullscreen-open");
+  setFullscreenButtonState(true);
+  showPlayerFullscreenControls();
 }
 
 function closePlayerFullscreen() {
@@ -3355,6 +3554,7 @@ function handlePlayerError(code, videoId = state.playerVideoId) {
   if (!videoId || videoId !== state.activeVideoId || videoId !== state.playerVideoId) {
     return;
   }
+  const preserveFullscreen = isPlayerFullscreen();
   const messages = {
     100: "This video was removed, private, or not found.",
     101: "The owner does not allow embedded playback.",
@@ -3367,19 +3567,22 @@ function handlePlayerError(code, videoId = state.playerVideoId) {
   state.playerError = messages[code] || "This video cannot play in the embedded player.";
   destroyPlayer();
   render();
+  if (preserveFullscreen) {
+    restorePlayerFullscreen();
+  }
   window.setTimeout(() => {
     if (state.activeVideoId === videoId) {
-      nextVideo();
+      nextVideo({ autoplay: false, preserveFullscreen: false });
     }
   }, 1600);
 }
 
-function nextVideo() {
+function nextVideo(options = {}) {
   const queue = state.queue.length ? state.queue : state.homeFeed;
   const currentIndex = queue.findIndex((video) => video.id === state.activeVideoId);
   const next = queue[(currentIndex + 1 + queue.length) % queue.length];
   if (next && next.id !== state.activeVideoId) {
-    openWatch(next.id, queue);
+    openWatch(next.id, queue, options);
   }
 }
 
@@ -3498,7 +3701,7 @@ app.addEventListener("click", async (event) => {
     replayActive();
   }
   if (action === "next-video") {
-    nextVideo();
+    nextVideo({ autoplay: true, preserveFullscreen: true });
   }
   if (action === "like") {
     await rateActiveVideo();

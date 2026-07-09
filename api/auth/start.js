@@ -4,12 +4,18 @@ const {
   READ_SCOPE,
   STATE_COOKIE,
   getConfig,
+  methodNotAllowed,
   redirect,
   sendJson,
   serializeCookie,
 } = require("./_shared");
 
 module.exports = function handler(req, res) {
+  if (req.method !== "GET") {
+    methodNotAllowed(res, ["GET"]);
+    return;
+  }
+
   const config = getConfig(req);
 
   if (!config.configured) {
