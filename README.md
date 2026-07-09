@@ -85,5 +85,6 @@ http://localhost:4173
 
 - Shorts are filtered out.
 - Home blends subscriptions, local watch/search history, liked-video seeds, and popular discovery.
+- Signed-in Home and subscription data is cached per account for fast reloads, with a stale offline fallback.
 - The app has no custom ads.
 - Secrets are not committed. `config.local.js`, `.env*`, `.vercel`, and `dist` are ignored.
