@@ -976,15 +976,10 @@ svg {
   padding: 9px 10px;
 }
 
-.description summary {
+.description h2 {
+  margin: 0;
   font-size: 13px;
   font-weight: 800;
-  list-style: none;
-  cursor: pointer;
-}
-
-.description summary::-webkit-details-marker {
-  display: none;
 }
 
 .description p {
@@ -992,6 +987,26 @@ svg {
   color: #ddd;
   font-size: 13px;
   line-height: 19px;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.description.expanded p {
+  display: block;
+}
+
+.description-toggle {
+  margin-top: 8px;
+  padding: 0;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }
 
 .comments-block {
