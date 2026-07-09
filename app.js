@@ -4,6 +4,9 @@ const API_BASE = "https://www.googleapis.com/youtube/v3";
 const WATCH_BASE = "https://www.youtube.com/watch";
 const MIN_FEED_DURATION_SECONDS = 61;
 const MAX_DISCOVERY_QUERIES = 4;
+const MAX_SUBSCRIPTION_UPLOAD_CHANNELS = 18;
+const MAX_SUBSCRIPTION_VIDEO_ROWS = 60;
+const PLAYLIST_FETCH_BATCH_SIZE = 4;
 
 const demoVideos = [
   {
@@ -726,30 +729,27 @@ async function loadSubscriptionsAndFeed(options = {}) {
     }
     state.subscriptions = channels;
 
-    const uploadsPerChannel = Math.max(state.config.uploadsPerChannel, 5);
-    const playlistResults = await Promise.allSettled(
-      channels
-        .filter((channel) => channel.uploadsPlaylistId)
-        .map((channel) => youtubeFetch("/playlistItems", {
-          part: "snippet,contentDetails",
-          playlistId: channel.uploadsPlaylistId,
-          maxResults: uploadsPerChannel,
-        }, { auth: true })),
-    );
+    const uploadsPerChannel = state.config.uploadsPerChannel;
+    const uploadChannels = channels
+      .filter((channel) => channel.uploadsPlaylistId)
+      .slice(0, MAX_SUBSCRIPTION_UPLOAD_CHANNELS);
+    const playlistResults = await loadSubscriptionPlaylistItems(uploadChannels, uploadsPerChannel);
 
     const uploadVideoIds = playlistResults
       .flatMap((result) => result.status === "fulfilled" ? result.value.items || [] : [])
       .map((item) => item.contentDetails?.videoId)
       .filter(Boolean);
 
-    const uniqueVideoIds = [...new Set(uploadVideoIds)];
+    const uniqueVideoIds = [...new Set(uploadVideoIds)].slice(0, MAX_SUBSCRIPTION_VIDEO_ROWS);
     let subscribedVideos = [];
     try {
       subscribedVideos = await loadVideoDetails(uniqueVideoIds, { auth: true });
     } catch {
       subscribedVideos = [];
     }
-    state.subscriptionVideos = subscribedVideos.filter((video) => !isLikelyShort(video));
+    state.subscriptionVideos = subscribedVideos
+      .filter((video) => !isLikelyShort(video))
+      .slice(0, MAX_SUBSCRIPTION_VIDEO_ROWS);
     const feed = await buildPersonalHomeFeed(state.subscriptionVideos);
 
     state.homeFeed = feed.length ? feed : state.subscriptionVideos;
@@ -766,6 +766,39 @@ async function loadSubscriptionsAndFeed(options = {}) {
     state.feedLoading = false;
     clearLoading();
   }
+}
+
+async function loadSubscriptionPlaylistItems(channels, uploadsPerChannel) {
+  const results = [];
+
+  for (let index = 0; index < channels.length; index += PLAYLIST_FETCH_BATCH_SIZE) {
+    const batch = channels.slice(index, index + PLAYLIST_FETCH_BATCH_SIZE);
+    const batchResults = await Promise.allSettled(
+      batch.map((channel) => youtubeFetch("/playlistItems", {
+        part: "snippet,contentDetails",
+        playlistId: channel.uploadsPlaylistId,
+        maxResults: uploadsPerChannel,
+      }, { auth: true })),
+    );
+    results.push(...batchResults);
+
+    if (index + PLAYLIST_FETCH_BATCH_SIZE < channels.length) {
+      await waitForIdleFrame();
+    }
+  }
+
+  return results;
+}
+
+function waitForIdleFrame() {
+  return new Promise((resolve) => {
+    if ("requestIdleCallback" in window) {
+      window.requestIdleCallback(resolve, { timeout: 250 });
+      return;
+    }
+
+    window.setTimeout(resolve, 50);
+  });
 }
 
 async function buildPersonalHomeFeed(subscribedVideos = []) {
