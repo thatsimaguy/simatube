@@ -1126,8 +1126,8 @@ html.player-fullscreen-open .screen-watch {
     top: 50%;
     right: auto;
     bottom: auto;
-    width: max(100vh, calc(100vw * 16 / 9));
-    height: max(100vw, calc(100vh * 9 / 16));
+    width: min(100vh, calc(100vw * 16 / 9));
+    height: min(100vw, calc(100vh * 9 / 16));
     transform: translate(-50%, -50%) rotate(90deg);
     transform-origin: center center;
   }
@@ -1136,8 +1136,8 @@ html.player-fullscreen-open .screen-watch {
     html.player-fullscreen-open .player-shell.app-fullscreen #playerMount,
     html.player-fullscreen-open .player-shell.app-fullscreen .poster-button,
     html.player-fullscreen-open .player-shell.app-fullscreen .player-fallback {
-      width: max(100dvh, calc(100dvw * 16 / 9));
-      height: max(100dvw, calc(100dvh * 9 / 16));
+      width: min(100dvh, calc(100dvw * 16 / 9));
+      height: min(100dvw, calc(100dvh * 9 / 16));
     }
   }
 }
