@@ -698,6 +698,15 @@ svg {
   flex: 0 0 auto;
 }
 
+.channel-avatar.fallback {
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #1e90ff, #2fca72);
+}
+
 .channel-avatar.large {
   width: 40px;
   height: 40px;
