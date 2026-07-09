@@ -1116,14 +1116,14 @@ html.player-fullscreen-open .app-shell {
   html.player-fullscreen-open .player-shell.app-fullscreen .poster-button,
   html.player-fullscreen-open .player-shell.app-fullscreen .player-fallback {
     position: absolute;
-    left: 100%;
-    top: 0;
+    left: 50%;
+    top: 50%;
     right: auto;
     bottom: auto;
     width: 100vh;
     height: 100vw;
-    transform: rotate(90deg);
-    transform-origin: top left;
+    transform: translate(-50%, -50%) rotate(90deg);
+    transform-origin: center center;
   }
 
   @supports (width: 100dvh) {
