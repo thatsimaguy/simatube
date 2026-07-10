@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-fs-exit-center-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-fs-exit-away-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -5357,6 +5357,9 @@ function restorePlayerFullscreen() {
 function closePlayerFullscreen() {
   window.clearTimeout(state.fullscreenExitTimer);
   state.fullscreenExitTimer = 0;
+  document.querySelectorAll(".player-fullscreen-button").forEach((button) => {
+    button.classList.remove("is-pressing", "is-exiting");
+  });
   document.querySelector(".player-shell.app-fullscreen")?.classList.remove("app-fullscreen");
   document.documentElement.classList.remove("player-fullscreen-open");
   document.body.classList.remove("player-fullscreen-open");
@@ -5383,13 +5386,25 @@ function animateFullscreenButtonPress(button) {
   window.setTimeout(() => button.classList.remove("is-pressing"), 540);
 }
 
+function animateFullscreenButtonAway(button) {
+  if (!(button instanceof HTMLElement) || !isPlayerFullscreen()) {
+    return;
+  }
+
+  button.classList.remove("is-pressing", "is-exiting");
+  void button.offsetWidth;
+  button.classList.add("is-exiting");
+}
+
 function exitPlayerFullscreenWithAnimation(button) {
   window.clearTimeout(state.fullscreenExitTimer);
-  animateFullscreenButtonPress(button || document.querySelector(".player-fullscreen-button"));
+  const exitButton = button || document.querySelector(".player-fullscreen-button");
+  animateFullscreenButtonPress(exitButton);
+  window.setTimeout(() => animateFullscreenButtonAway(exitButton), 90);
   state.fullscreenExitTimer = window.setTimeout(() => {
     state.fullscreenExitTimer = 0;
     closePlayerFullscreen();
-  }, 230);
+  }, 430);
 }
 
 function showPlayerFullscreenControls() {
