@@ -1,12 +1,12 @@
 const READ_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
 const WRITE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl";
 const API_BASE = "https://www.googleapis.com/youtube/v3";
-const WATCH_BASE = "https://www.youtube.com/watch";
 const IS_IOS_WEBKIT = /iphone|ipad|ipod/i.test(navigator.userAgent)
   || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const IS_MEMORY_CONSTRAINED_MOBILE = IS_IOS_WEBKIT
   || (window.matchMedia?.("(pointer: coarse)")?.matches && Number(navigator.deviceMemory || 8) <= 4);
-const MIN_FEED_DURATION_SECONDS = 61;
+const MIN_FEED_DURATION_SECONDS = 121;
+const COMPLETED_WATCH_PERCENT = 98;
 const MAX_DISCOVERY_QUERIES = IS_MEMORY_CONSTRAINED_MOBILE ? 2 : 4;
 const MAX_SUBSCRIPTION_UPLOAD_CHANNELS = IS_MEMORY_CONSTRAINED_MOBILE ? 6 : 10;
 const MAX_SUBSCRIPTION_VIDEO_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 18 : 30;
@@ -18,21 +18,25 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-fs-exit-slimmer-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-fyp-folders-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
+const SAVED_FOLDERS_KEY = "yt_saved_folders_v1";
+const ACTIVE_SAVED_FOLDER_KEY = "yt_active_saved_folder_id";
+const DEFAULT_SAVED_FOLDER_ID = "all";
 const PERSONAL_CACHE_FRESH_MS = 30 * 60 * 1000;
 const PERSONAL_CACHE_MAX_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INITIAL_VIDEO_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
 const VIDEO_ROWS_INCREMENT = IS_MEMORY_CONSTRAINED_MOBILE ? 6 : 8;
-const MAX_HOME_FEED_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 48 : 72;
-const MAX_VIDEO_CACHE_ENTRIES = 240;
+const MAX_HOME_FEED_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 120 : 180;
+const MAX_VIDEO_CACHE_ENTRIES = 360;
 const MAX_CHANNEL_CACHE_ENTRIES = 120;
 const MAX_CHANNEL_VIDEO_CACHES = 12;
 const MAX_SEARCH_CACHE_ENTRIES = 8;
 const MAX_COMMENTS_CACHE_ENTRIES = 6;
 const MAX_SAVED_VIDEOS = 50;
+const MAX_SAVED_FOLDERS = 16;
 const MAX_PROGRESS_ENTRIES = 180;
 const LIBRARY_INITIAL_VIDEO_ROWS = 6;
 const INITIAL_SUBSCRIPTION_CHANNELS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
@@ -131,6 +135,14 @@ const storedSavedVideos = readArray("yt_saved_videos")
 const storedSavedIds = readArray("yt_saved_ids")
   .filter((id) => typeof id === "string")
   .slice(0, MAX_SAVED_VIDEOS);
+const storedSavedFolders = normalizeSavedFolders(
+  readArray(SAVED_FOLDERS_KEY),
+  new Set([...storedSavedIds, ...storedSavedVideos.map((video) => video.id)]),
+);
+const storedActiveSavedFolderId = sanitizeActiveSavedFolderId(
+  readString(ACTIVE_SAVED_FOLDER_KEY, DEFAULT_SAVED_FOLDER_ID),
+  storedSavedFolders,
+);
 
 const state = {
   view: "home",
@@ -178,6 +190,8 @@ const state = {
   recentChannels: readArray("yt_recent_channels").map(compactStoredChannel).filter((channel) => channel?.id).slice(0, 12),
   savedIds: new Set([...storedSavedIds, ...storedSavedVideos.map((video) => video.id)]),
   savedVideos: storedSavedVideos,
+  savedFolders: storedSavedFolders,
+  activeSavedFolderId: storedActiveSavedFolderId,
   localHistory: readArray("yt_history").map(compactStoredVideo).filter((video) => video?.id).slice(0, 30),
   watchProgressById: readWatchProgress(),
   searchHistory: readArray("yt_search_history").filter((query) => typeof query === "string").slice(0, 20),
@@ -200,6 +214,9 @@ const state = {
   homeFeedLoadScheduled: false,
   homeFeedLoadVersion: 0,
   homeFeedAbortController: null,
+  homeFeedAppendLoading: false,
+  homeDiscoveryPageTokens: {},
+  homeSessionSeed: createHomeSessionSeed(),
   homeFeedStatus: "idle",
   homeFeedError: "",
   usingCachedPersonalFeed: false,
@@ -666,7 +683,7 @@ function scheduleInitialPersonalLoad(cacheStatus = {}) {
   if (cacheStatus.subscriptionsFresh) {
     state.feedLoading = false;
     markBootStable();
-    if (state.view === "home" && !cacheStatus.homeFresh) {
+    if (state.view === "home") {
       scheduleHomeFeedEnrichment({ refresh: true });
     }
     return;
@@ -709,6 +726,10 @@ function readString(key, fallback = "") {
   return typeof value === "string" ? value : fallback;
 }
 
+function createHomeSessionSeed() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function writeJson(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
@@ -746,9 +767,66 @@ function sanitizeWatchProgress(value) {
     current: Math.round(current),
     duration: Math.round(duration),
     percent: Math.round(percent * 10) / 10,
-    completed: percent >= 92,
+    completed: percent >= COMPLETED_WATCH_PERCENT,
     updatedAt,
   };
+}
+
+function normalizeSavedFolders(value, savedIds = new Set()) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set();
+  return value
+    .map((folder) => {
+      if (!folder || typeof folder !== "object" || Array.isArray(folder)) {
+        return null;
+      }
+      const id = sanitizeSavedFolderId(folder.id);
+      const name = sanitizeSavedFolderName(folder.name);
+      if (!id || !name || id === DEFAULT_SAVED_FOLDER_ID || seen.has(id)) {
+        return null;
+      }
+      seen.add(id);
+      const videoIds = [...new Set((Array.isArray(folder.videoIds) ? folder.videoIds : [])
+        .filter((videoId) => typeof videoId === "string")
+        .filter((videoId) => !savedIds.size || savedIds.has(videoId)))]
+        .slice(0, MAX_SAVED_VIDEOS);
+      return { id, name, videoIds };
+    })
+    .filter(Boolean)
+    .slice(0, MAX_SAVED_FOLDERS);
+}
+
+function sanitizeSavedFolderId(value = "") {
+  return typeof value === "string"
+    ? value.replace(/[^a-z0-9_-]/gi, "").slice(0, 48)
+    : "";
+}
+
+function sanitizeSavedFolderName(value = "") {
+  return String(value)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 32);
+}
+
+function createSavedFolderId(name) {
+  const slug = sanitizeSavedFolderName(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24) || "folder";
+  return `${slug}-${Date.now().toString(36).slice(-5)}`;
+}
+
+function sanitizeActiveSavedFolderId(folderId, folders = []) {
+  const id = sanitizeSavedFolderId(folderId);
+  if (id === DEFAULT_SAVED_FOLDER_ID || folders.some((folder) => folder.id === id)) {
+    return id || DEFAULT_SAVED_FOLDER_ID;
+  }
+  return DEFAULT_SAVED_FOLDER_ID;
 }
 
 function saveWatchProgress() {
@@ -791,7 +869,7 @@ function restorePersonalCache(profileId) {
 
   const recoveryChannelLimit = state.recoveryMode ? 20 : 50;
   const recoveryVideoLimit = state.recoveryMode ? Math.min(12, MAX_SUBSCRIPTION_VIDEO_ROWS) : MAX_SUBSCRIPTION_VIDEO_ROWS;
-  const recoveryHomeLimit = state.recoveryMode ? 16 : 40;
+  const recoveryHomeLimit = state.recoveryMode ? 24 : Math.min(MAX_HOME_FEED_ROWS, 90);
   const recoveryLikedLimit = state.recoveryMode ? 8 : 25;
   const subscriptions = subscriptionsUsable && Array.isArray(cached.subscriptions)
     ? cached.subscriptions.map(compactStoredChannel).filter((channel) => channel?.id).slice(0, recoveryChannelLimit)
@@ -815,7 +893,7 @@ function restorePersonalCache(profileId) {
 
   state.subscriptions = subscriptions;
   state.subscriptionVideos = subscriptionVideos;
-  state.homeFeed = homeFeed.length ? homeFeed : subscriptionVideos.slice(0, 40);
+  state.homeFeed = shuffleHomeFeedForSession(homeFeed.length ? homeFeed : subscriptionVideos.slice(0, 40));
   state.queue = state.homeFeed;
   state.likedVideos = likedVideos;
   state.likedVideosLoaded = cached.likedVideosLoaded === true || likedVideos.length > 0;
@@ -846,7 +924,7 @@ function savePersonalCache(options = {}) {
   const previous = readPersonalCache();
   const sameProfile = previous?.profile?.id === profile.id ? previous : null;
   const now = Date.now();
-  const homeFeed = state.homeFeed.slice(0, 40).map(compactStoredVideo);
+  const homeFeed = state.homeFeed.slice(0, Math.min(MAX_HOME_FEED_ROWS, 90)).map(compactStoredVideo);
   const feedReasonsById = Object.fromEntries(homeFeed
     .map((video) => [video.id, state.feedReasonsById[video.id] || ""])
     .filter(([, reason]) => reason));
@@ -895,14 +973,14 @@ function cachedOfflineHomeFeed() {
     return [];
   }
   const feed = Array.isArray(cached.homeFeed)
-    ? cached.homeFeed.map(compactStoredVideo).filter((video) => video?.id).slice(0, 40)
+    ? cached.homeFeed.map(compactStoredVideo).filter((video) => video?.id).slice(0, Math.min(MAX_HOME_FEED_ROWS, 90))
     : [];
   if (feed.length) {
     state.feedReasonsById = stringRecord(cached.feedReasonsById);
     state.usingCachedPersonalFeed = true;
     cacheVideos(feed);
   }
-  return feed;
+  return shuffleHomeFeedForSession(feed);
 }
 
 function stringRecord(value) {
@@ -1293,6 +1371,9 @@ async function loadPopularHome(options = {}) {
     return;
   }
 
+  if (options.refresh) {
+    prepareHomeRefresh();
+  }
   state.feedLoading = !state.homeFeed.length;
   state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
   state.homeFeedError = "";
@@ -1726,9 +1807,7 @@ async function performSubscriptionLoad(options = {}, loadVersion = state.subscri
     if (!state.homeFeed.length && state.subscriptionVideos.length) {
       state.homeFeed = state.subscriptionVideos.slice(0, 40);
       state.homeFeedStatus = "stale";
-      state.feedReasonsById = Object.fromEntries(
-        state.homeFeed.map((video) => [video.id, "From your channels"]),
-      );
+      state.feedReasonsById = {};
       if (state.view === "home" || !state.queue.length) {
         state.queue = state.homeFeed;
       }
@@ -1809,6 +1888,12 @@ function cancelHomeFeedRequest() {
   state.homeFeedLoadScheduled = false;
 }
 
+function prepareHomeRefresh() {
+  state.homeSessionSeed = createHomeSessionSeed();
+  state.homeDiscoveryPageTokens = {};
+  state.visibleRowsBySource.home = initialRowsForSource("home");
+}
+
 function scheduleHomeFeedEnrichment(options = {}) {
   if ((state.homeFeedLoaded && !options.refresh)
     || state.homeFeedLoadPromise
@@ -1840,6 +1925,10 @@ function loadPersonalHomeFeed(options = {}) {
   }
   if (state.homeFeedLoadPromise) {
     return state.homeFeedLoadPromise;
+  }
+
+  if (options.refresh && !options.append) {
+    prepareHomeRefresh();
   }
 
   const authVersion = state.authVersion;
@@ -1904,6 +1993,57 @@ function loadPersonalHomeFeed(options = {}) {
   return request;
 }
 
+async function loadMoreHomeFeed() {
+  if (state.homeFeedAppendLoading
+    || state.homeFeedLoadPromise
+    || state.homeFeedStatus === "loading"
+    || navigator.onLine === false
+    || !hasApiAccess()) {
+    return false;
+  }
+
+  state.homeFeedAppendLoading = true;
+  if (state.view === "home" && state.homeFilter === "all") {
+    render();
+  }
+  try {
+    const existingIds = new Set(state.homeFeed.map((video) => video.id));
+    let candidates = [];
+    if (state.auth.accessToken) {
+      candidates = await buildPersonalHomeFeed(state.subscriptionVideos, {
+        append: true,
+        limit: VIDEO_ROWS_INCREMENT * 5,
+      });
+    } else {
+      const popular = await loadPopularVideos();
+      candidates = rankHomeCandidates(popular.map((video) => ({ video, source: "popular" })), {
+        limit: VIDEO_ROWS_INCREMENT * 5,
+      });
+    }
+
+    const additions = candidates
+      .filter((video) => video?.id && !existingIds.has(video.id) && !isLikelyShort(video))
+      .slice(0, VIDEO_ROWS_INCREMENT * 3);
+    if (!additions.length) {
+      return false;
+    }
+
+    state.homeFeed = [...state.homeFeed, ...additions].slice(0, MAX_HOME_FEED_ROWS);
+    cacheVideos(additions);
+    if (state.view === "home" || !state.queue.length) {
+      state.queue = state.homeFeed;
+    }
+    if (state.auth.profile) {
+      savePersonalCache({ home: true });
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    state.homeFeedAppendLoading = false;
+  }
+}
+
 async function buildPersonalHomeFeed(subscribedVideos = [], options = {}) {
   const likedVideos = await loadLikedVideoSeeds(options);
   if (options.signal?.aborted) {
@@ -1924,7 +2064,7 @@ async function buildPersonalHomeFeed(subscribedVideos = [], options = {}) {
     ...popularVideos.map((video) => ({ video, source: "popular" })),
   ];
 
-  return rankHomeCandidates(candidates);
+  return rankHomeCandidates(candidates, { limit: options.limit || MAX_HOME_FEED_ROWS });
 }
 
 async function loadLikedVideoSeeds(options = {}) {
@@ -1962,21 +2102,34 @@ async function loadPopularVideos(options = {}) {
 }
 
 async function loadInterestDiscoveryVideos(options = {}) {
-  const queries = recommendationQueries();
+  const queries = recommendationQueries({ includeFallback: options.append });
   if (!queries.length || !hasApiAccess()) {
     return [];
   }
+  const orders = options.append ? ["relevance", "date", "viewCount", "rating"] : ["relevance"];
 
   const searchResults = await Promise.allSettled(
-    queries.map((query) => youtubeFetch("/search", {
-      part: "snippet",
-      q: query,
-      type: "video",
-      videoEmbeddable: "true",
-      maxResults: 8,
-      regionCode: state.config.regionCode,
-      order: "relevance",
-    }, { auth: Boolean(state.auth.accessToken), signal: options.signal })),
+    queries.flatMap((query, queryIndex) => {
+      const order = orders[queryIndex % orders.length];
+      const tokenKey = `${order}:${query}`;
+      const pageToken = options.append ? state.homeDiscoveryPageTokens[tokenKey] || "" : "";
+      return youtubeFetch("/search", {
+        part: "snippet",
+        q: `${query} -shorts`,
+        type: "video",
+        videoEmbeddable: "true",
+        maxResults: options.append ? 10 : 8,
+        regionCode: state.config.regionCode,
+        order,
+        pageToken,
+      }, { auth: Boolean(state.auth.accessToken), signal: options.signal })
+        .then((payload) => {
+          if (options.append && payload.nextPageToken) {
+            state.homeDiscoveryPageTokens[tokenKey] = payload.nextPageToken;
+          }
+          return payload;
+        });
+    }),
   );
 
   const ids = [...new Set(searchResults
@@ -1990,18 +2143,32 @@ async function loadInterestDiscoveryVideos(options = {}) {
   });
 }
 
-function recommendationQueries() {
+function recommendationQueries(options = {}) {
   const watchedHasShape = state.localHistory.length >= 3
     && new Set(state.localHistory.map((video) => video.channelId).filter(Boolean)).size >= 2;
   const sources = [
     ...state.searchHistory.slice(0, 4),
     ...state.likedVideos.slice(0, 8).map(videoTopicSeed),
     ...(watchedHasShape ? state.localHistory.slice(0, 3).map(videoTopicSeed) : []),
+    ...(options.includeFallback ? state.subscriptions.slice(0, 6).map((channel) => channel.title) : []),
+  ];
+  const fallback = [
+    "gaming news",
+    "technology analysis",
+    "internet culture",
+    "documentary",
+    "creator commentary",
   ];
 
-  return [...new Set(sources
+  const queries = [...new Set(sources
     .map(cleanRecommendationQuery)
-    .filter(Boolean))]
+    .filter(Boolean))];
+  if (options.includeFallback) {
+    queries.push(...fallback);
+  }
+
+  return [...new Set(queries)]
+    .sort((a, b) => stableDailyJitter(b) - stableDailyJitter(a))
     .slice(0, MAX_DISCOVERY_QUERIES);
 }
 
@@ -2022,7 +2189,8 @@ function cleanRecommendationQuery(value = "") {
   return cleaned.split(" ").slice(0, 4).join(" ");
 }
 
-function rankHomeCandidates(candidates) {
+function rankHomeCandidates(candidates, options = {}) {
+  const limit = clampNumber(options.limit, 1, MAX_HOME_FEED_ROWS, MAX_HOME_FEED_ROWS);
   const watchedIds = new Set(state.localHistory.map((video) => video.id));
   const unique = dedupeCandidates(candidates)
     .filter(({ video }) => video.id && !isLikelyShort(video));
@@ -2036,7 +2204,7 @@ function rankHomeCandidates(candidates) {
     }))
     .sort((a, b) => b.score - a.score);
 
-  const diversified = balanceHomeCandidates(scored).slice(0, MAX_HOME_FEED_ROWS);
+  const diversified = balanceHomeCandidates(scored, limit).slice(0, limit);
   state.feedReasonsById = {};
   return diversified.map(({ video }) => video);
 }
@@ -2118,19 +2286,6 @@ function interestMatchScore(video, interestTerms) {
   return Math.min(matches * 4, 18);
 }
 
-function feedReasonForSource(video, source) {
-  if (state.subscriptionIdsByChannel[video.channelId]) {
-    return "From your channels";
-  }
-  if (source === "interest") {
-    return state.localHistory.length || state.searchHistory.length ? "Because you watched" : "Picked for you";
-  }
-  if (source === "popular") {
-    return "Trending";
-  }
-  return "Recommended";
-}
-
 function diversifyByChannel(items) {
   const picked = [];
   const deferred = [];
@@ -2151,7 +2306,7 @@ function diversifyByChannel(items) {
   return [...picked, ...deferred];
 }
 
-function balanceHomeCandidates(items) {
+function balanceHomeCandidates(items, limit = MAX_HOME_FEED_ROWS) {
   const buckets = {
     subscription: [],
     interest: [],
@@ -2187,7 +2342,7 @@ function balanceHomeCandidates(items) {
   }
 
   let cursor = 0;
-  while (picked.length < MAX_HOME_FEED_ROWS && picked.length < items.length) {
+  while (picked.length < limit && picked.length < items.length) {
     const preferred = sourcePattern[cursor % sourcePattern.length];
     cursor += 1;
     const next = takeFrom(preferred)
@@ -2209,7 +2364,14 @@ function balanceHomeCandidates(items) {
 }
 
 function isLikelyShort(video) {
-  return Number(video.durationSeconds || 0) > 0 && Number(video.durationSeconds) < MIN_FEED_DURATION_SECONDS;
+  const seconds = Number(video.durationSeconds || 0);
+  const text = [
+    video?.title,
+    video?.description,
+    ...(Array.isArray(video?.tags) ? video.tags : []),
+  ].join(" ").toLowerCase();
+  return (seconds > 0 && seconds < MIN_FEED_DURATION_SECONDS)
+    || /\b#?shorts?\b|youtube shorts/.test(text);
 }
 
 function ageInDays(dateValue) {
@@ -2224,12 +2386,16 @@ function ageInDays(dateValue) {
 }
 
 function stableDailyJitter(id = "") {
-  const seed = `${new Date().toISOString().slice(0, 10)}:${id}`;
+  const seed = `${state.homeSessionSeed}:${id}`;
   let hash = 0;
   for (let index = 0; index < seed.length; index += 1) {
     hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
   }
   return (hash % 1000) / 100;
+}
+
+function shuffleHomeFeedForSession(videos = []) {
+  return [...videos].sort((a, b) => stableDailyJitter(b.id) - stableDailyJitter(a.id));
 }
 
 async function loadChannels(channelIds, options = {}) {
@@ -2615,6 +2781,28 @@ function pruneCommentsCache() {
   }
 }
 
+async function refreshHomeFeed() {
+  if (state.auth.accessToken) {
+    prepareHomeRefresh();
+    state.homeFeedLoaded = false;
+    state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
+    state.homeFeedError = "";
+    render();
+    await loadSubscriptionsAndFeed({
+      refresh: true,
+      includeHome: false,
+      quiet: true,
+      background: Boolean(state.homeFeed.length),
+    });
+    await loadPersonalHomeFeed({ refresh: true });
+    return;
+  }
+
+  if (hasApiAccess()) {
+    await loadPopularHome({ refresh: true });
+  }
+}
+
 async function loadComments(videoId) {
   cancelCommentsAutoload();
   cancelCommentsRequest();
@@ -2782,11 +2970,6 @@ async function subscribeToActiveChannel(channelId = currentVideo()?.channelId) {
       delete state.subscriptionIdsByChannel[channelId];
       state.subscriptions = state.subscriptions.filter((channel) => channel.id !== channelId);
       state.subscriptionVideos = state.subscriptionVideos.filter((item) => item.channelId !== channelId);
-      state.homeFeed
-        .filter((item) => item.channelId === channelId && state.feedReasonsById[item.id] === "From your channels")
-        .forEach((item) => {
-          state.feedReasonsById[item.id] = "Recommended";
-        });
       showToast("Unsubscribed.");
     } else {
       const payload = await youtubeFetch("/subscriptions", { part: "snippet" }, {
@@ -3388,16 +3571,41 @@ function savedLibraryVideos() {
   return videos.slice(0, MAX_SAVED_VIDEOS);
 }
 
+function savedFolderVideos(folderId = DEFAULT_SAVED_FOLDER_ID) {
+  if (folderId === DEFAULT_SAVED_FOLDER_ID) {
+    return savedLibraryVideos();
+  }
+  const folder = state.savedFolders.find((item) => item.id === folderId);
+  if (!folder) {
+    return savedLibraryVideos();
+  }
+  const folderIds = new Set(folder.videoIds);
+  return savedLibraryVideos().filter((video) => folderIds.has(video.id));
+}
+
+function persistSavedFolders() {
+  const savedIds = state.savedIds;
+  state.savedFolders = normalizeSavedFolders(state.savedFolders, savedIds);
+  state.activeSavedFolderId = sanitizeActiveSavedFolderId(state.activeSavedFolderId, state.savedFolders);
+  writeJson(SAVED_FOLDERS_KEY, state.savedFolders);
+  writeJson(ACTIVE_SAVED_FOLDER_KEY, state.activeSavedFolderId);
+}
+
 function persistSavedLibrary() {
   state.savedVideos = savedLibraryVideos();
   writeJson("yt_saved_ids", [...state.savedIds]);
   writeJson("yt_saved_videos", state.savedVideos);
+  persistSavedFolders();
 }
 
 function toggleSaved(videoId) {
   if (state.savedIds.has(videoId)) {
     state.savedIds.delete(videoId);
     state.savedVideos = state.savedVideos.filter((video) => video.id !== videoId);
+    state.savedFolders = state.savedFolders.map((folder) => ({
+      ...folder,
+      videoIds: folder.videoIds.filter((id) => id !== videoId),
+    }));
     showToast("Removed from saved.");
   } else {
     state.savedIds.add(videoId);
@@ -3408,6 +3616,9 @@ function toggleSaved(videoId) {
         ...state.savedVideos.filter((item) => item.id !== videoId),
       ].slice(0, MAX_SAVED_VIDEOS);
     }
+    if (state.activeSavedFolderId !== DEFAULT_SAVED_FOLDER_ID) {
+      addVideoToSavedFolder(videoId, state.activeSavedFolderId);
+    }
     showToast("Saved.");
   }
 
@@ -3415,22 +3626,109 @@ function toggleSaved(videoId) {
   render();
 }
 
-async function shareVideo(video) {
-  const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
-  try {
-    if (navigator.share) {
-      await navigator.share({ title: video.title, url });
-      return;
-    }
-
-    await navigator.clipboard.writeText(url);
-    showToast("Link copied.");
-  } catch {
-    openSheet("Share", url, [
-      { label: "Open YouTube", href: url, icon: "external" },
-      { label: "Close", action: closeSheet, icon: "close" },
-    ]);
+function addVideoToSavedFolder(videoId, folderId) {
+  const folder = state.savedFolders.find((item) => item.id === folderId);
+  if (!folder || !videoId) {
+    return false;
   }
+  folder.videoIds = [
+    videoId,
+    ...folder.videoIds.filter((id) => id !== videoId),
+  ].slice(0, MAX_SAVED_VIDEOS);
+  return true;
+}
+
+function toggleVideoInSavedFolder(videoId, folderId) {
+  const folder = state.savedFolders.find((item) => item.id === folderId);
+  if (!folder || !videoId) {
+    return false;
+  }
+  if (!state.savedIds.has(videoId)) {
+    state.savedIds.add(videoId);
+    const video = findVideo(videoId);
+    if (video) {
+      state.savedVideos = [
+        compactStoredVideo(video),
+        ...state.savedVideos.filter((item) => item.id !== videoId),
+      ].slice(0, MAX_SAVED_VIDEOS);
+    }
+  }
+  if (folder.videoIds.includes(videoId)) {
+    folder.videoIds = folder.videoIds.filter((id) => id !== videoId);
+    showToast(`Removed from ${folder.name}.`);
+  } else {
+    addVideoToSavedFolder(videoId, folderId);
+    showToast(`Saved to ${folder.name}.`);
+  }
+  persistSavedLibrary();
+  render();
+  return true;
+}
+
+function createSavedFolder(name, videoId = "") {
+  const cleanName = sanitizeSavedFolderName(name);
+  if (!cleanName) {
+    return null;
+  }
+  const existing = state.savedFolders.find((folder) => folder.name.toLowerCase() === cleanName.toLowerCase());
+  const folder = existing || {
+    id: createSavedFolderId(cleanName),
+    name: cleanName,
+    videoIds: [],
+  };
+  if (!existing) {
+    state.savedFolders = [folder, ...state.savedFolders].slice(0, MAX_SAVED_FOLDERS);
+  }
+  state.activeSavedFolderId = folder.id;
+  if (videoId) {
+    if (!state.savedIds.has(videoId)) {
+      state.savedIds.add(videoId);
+      const video = findVideo(videoId);
+      if (video) {
+        state.savedVideos = [
+          compactStoredVideo(video),
+          ...state.savedVideos.filter((item) => item.id !== videoId),
+        ].slice(0, MAX_SAVED_VIDEOS);
+      }
+    }
+    addVideoToSavedFolder(videoId, folder.id);
+  }
+  persistSavedLibrary();
+  showToast(videoId ? `Saved to ${folder.name}.` : `Created ${folder.name}.`);
+  render();
+  return folder;
+}
+
+function promptCreateSavedFolder(videoId = "") {
+  const name = window.prompt("New folder name");
+  if (!name) {
+    return;
+  }
+  createSavedFolder(name, videoId);
+}
+
+function openSavedFolderSheet(videoId = currentVideo().id) {
+  const video = findVideo(videoId);
+  if (!video) {
+    return;
+  }
+  const folderActions = state.savedFolders.map((folder) => {
+    const inFolder = folder.videoIds.includes(video.id);
+    return {
+      label: `${inFolder ? "Remove from" : "Save to"} ${folder.name}`,
+      icon: inFolder ? "check" : "folder",
+      action: () => {
+        toggleVideoInSavedFolder(video.id, folder.id);
+        closeSheet();
+      },
+    };
+  });
+  openSheet(video.title, "Save this video into folders inside SimaTube.", [
+    { label: state.savedIds.has(video.id) ? "Remove saved" : "Save video", icon: state.savedIds.has(video.id) ? "bookmark-filled" : "bookmark", action: () => { toggleSaved(video.id); closeSheet(); } },
+    ...folderActions,
+    { label: "Create folder", icon: "plus", action: () => { closeSheet(); promptCreateSavedFolder(video.id); } },
+    { label: "Close", icon: "close", action: closeSheet },
+  ]);
 }
 
 function setView(view, options = {}) {
@@ -3546,6 +3844,16 @@ function growVisibleRowsNearBottom() {
   }
   const list = videoListForSource(source);
   const visibleLimit = state.visibleRowsBySource[source] || initialRowsForSource(source);
+  if (source === "home"
+    && state.homeFilter === "all"
+    && Array.isArray(list)
+    && list.length - visibleLimit <= VIDEO_ROWS_INCREMENT * 2) {
+    loadMoreHomeFeed().then((added) => {
+      if (added && state.view === "home" && state.homeFilter === "all") {
+        render();
+      }
+    });
+  }
   if (!Array.isArray(list) || list.length <= visibleLimit) {
     return;
   }
@@ -3568,7 +3876,7 @@ function filteredHomeFeed() {
   }
 
   if (state.homeFilter === "saved") {
-    return savedLibraryVideos();
+    return savedFolderVideos(state.activeSavedFolderId);
   }
 
   return state.homeFeed;
@@ -3707,9 +4015,9 @@ function returnHomeOnAppResume() {
   render();
   resetScroll();
   if (state.auth.accessToken) {
-    scheduleHomeFeedEnrichment();
+    scheduleHomeFeedEnrichment({ refresh: true });
   } else if (hasApiAccess()) {
-    loadPopularHome();
+    loadPopularHome({ refresh: true });
   }
   return true;
 }
@@ -4099,7 +4407,11 @@ function renderHome() {
         ${filterChip("all", personalized ? "For you" : "Popular")}
         ${filterChip("today", "New")}
         ${filterChip("saved", "Saved")}
+        <button class="home-refresh-button" type="button" data-action="refresh-home" aria-label="Refresh For you" title="Refresh For you"${pendingButtonAttributes(state.homeFeedStatus === "refreshing" || state.homeFeedLoadPromise)}>
+          ${icon("refresh")}
+        </button>
       </div>
+      ${state.homeFilter === "saved" ? renderSavedFolderRail() : ""}
       ${renderHomeStatus()}
       ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, feedSource, emptyMessage)}
     </section>
@@ -4171,6 +4483,28 @@ function renderReconnectPill() {
 function filterChip(value, label) {
   const active = state.homeFilter === value ? " active" : "";
   return `<button class="chip${active}" type="button" data-action="home-filter" data-filter="${escapeHtml(value)}" aria-pressed="${state.homeFilter === value ? "true" : "false"}">${escapeHtml(label)}</button>`;
+}
+
+function renderSavedFolderRail() {
+  const allActive = state.activeSavedFolderId === DEFAULT_SAVED_FOLDER_ID ? " active" : "";
+  const folders = state.savedFolders.map((folder) => {
+    const active = state.activeSavedFolderId === folder.id ? " active" : "";
+    return `
+      <button class="folder-chip${active}" type="button" data-action="saved-folder" data-folder-id="${escapeHtml(folder.id)}" aria-pressed="${active ? "true" : "false"}">
+        ${icon("folder")}<span>${escapeHtml(folder.name)}</span><small>${folder.videoIds.length}</small>
+      </button>
+    `;
+  }).join("");
+
+  return `
+    <div class="folder-row" aria-label="Saved folders">
+      <button class="folder-chip${allActive}" type="button" data-action="saved-folder" data-folder-id="${DEFAULT_SAVED_FOLDER_ID}" aria-pressed="${allActive ? "true" : "false"}">
+        ${icon("bookmark-filled")}<span>All</span><small>${savedLibraryVideos().length}</small>
+      </button>
+      ${folders}
+      <button class="folder-chip create" type="button" data-action="create-saved-folder">${icon("plus")}<span>New folder</span></button>
+    </div>
+  `;
 }
 
 function sanitizeSearchSort(sort) {
@@ -4312,7 +4646,6 @@ function renderWatch() {
   const commentsPending = commentsStatus === "loading"
     || (commentsStatus === "idle" && hasApiAccess())
     || state.pendingActions.has(`comments:${video.id}`);
-  const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
   const autoplayPending = state.pendingAutoplayVideoId === video.id || autoplayRecoveryActive(video.id);
 
   return `
@@ -4330,7 +4663,6 @@ function renderWatch() {
           <div class="player-fallback">
             <strong>Playback blocked here</strong>
             <span>${escapeHtml(state.playerError)}</span>
-            <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${icon("external")}<span>Open in YouTube</span></a>
           </div>
         ` : ""}
       </div>
@@ -4357,9 +4689,8 @@ function renderWatch() {
         </div>
         <div class="action-row" aria-label="Video actions">
           ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
-          ${actionPill("replay", "Replay", "replay")}
           ${actionPill("save", saved ? "Saved" : "Save", saved ? "bookmark-filled" : "bookmark", saved, true)}
-          ${actionPill("share", "Share", "share")}
+          ${actionPill("folder", "Folder", "folder")}
         </div>
         ${renderDescription(video)}
         <section class="comments-block">
@@ -4553,7 +4884,6 @@ function renderChannel() {
   const subscribed = Boolean(state.subscriptionIdsByChannel[channel.id]);
   const videos = sortedChannelVideos(channel.id);
   const showLoader = state.channelLoading && !videos.length;
-  const youtubeUrl = `https://www.youtube.com/channel/${encodeURIComponent(channel.id)}`;
   const meta = [
     channel.subscriberCount ? `${channel.subscriberCount} subscribers` : "",
     channel.videoCount ? `${channel.videoCount} videos` : "",
@@ -4564,7 +4894,6 @@ function renderChannel() {
       <section class="channel-hero">
         <div class="channel-hero-top">
           <button class="icon-button channel-back" type="button" data-action="view" data-view="home" aria-label="Back to Home" title="Back to Home">${icon("back")}</button>
-          <a class="channel-youtube-link" href="${escapeHtml(youtubeUrl)}" target="_blank" rel="noopener noreferrer">${icon("external")}<span>YouTube</span></a>
         </div>
         <div class="channel-identity">
           ${renderChannelImage(channel, "hero")}
@@ -4637,7 +4966,7 @@ function renderChannelLoader() {
 
 function renderYou() {
   const profile = state.auth.profile;
-  const savedVideos = savedLibraryVideos();
+  const visibleSavedVideos = savedFolderVideos(state.activeSavedFolderId);
   const likedPending = state.pendingActions.has("liked-videos");
   const likedActionLabel = likedPending ? "Loading" : state.likedVideosLoaded ? "Refresh" : "Load";
   return `
@@ -4660,9 +4989,10 @@ function renderYou() {
       <section class="library-block">
         <div class="section-head">
           <h2>Saved</h2>
-          <span>${savedVideos.length}</span>
+          <button class="text-button" type="button" data-action="create-saved-folder">${icon("plus")}<span>Folder</span></button>
         </div>
-        ${renderVideoList(savedVideos, "saved", "Save a video to keep it here.")}
+        ${renderSavedFolderRail()}
+        ${renderVideoList(visibleSavedVideos, "saved", "Save a video to keep it here.")}
       </section>
       <section class="library-block">
         <div class="section-head">
@@ -4694,9 +5024,13 @@ function renderVideoList(videos, source, emptyMessage = "Nothing to show yet.") 
   const visibleLimit = state.visibleRowsBySource[source] || initialRowsForSource(source);
   const visibleVideos = list.slice(0, visibleLimit);
   const remaining = Math.max(0, list.length - visibleVideos.length);
+  const isInfiniteHome = source === "home";
   return `
     <div class="video-list">${visibleVideos.map((video, index) => renderVideoRow(video, source, index)).join("")}</div>
-    ${remaining ? `
+    ${state.homeFeedAppendLoading && isInfiniteHome ? `
+      <div class="inline-state home-status" role="status"><strong>Loading more</strong><span>Finding more long-form videos.</span></div>
+    ` : ""}
+    ${remaining && !isInfiniteHome ? `
       <div class="load-more-row">
         <button class="secondary-button load-more-button" type="button" data-action="load-more" data-source="${escapeHtml(source)}">
           <span>Show ${Math.min(remaining, VIDEO_ROWS_INCREMENT)} more</span>${icon("chevron-down")}
@@ -4712,12 +5046,12 @@ function renderVideoRow(video, source, itemIndex = -1) {
   }
 
   const saved = state.savedIds.has(video.id);
-  const watched = state.localHistory.some((item) => item.id === video.id);
   const reason = videoFeedReason(video, source);
   const progress = watchProgressPercent(video);
+  const watched = isVideoCompleted(video);
   const stateClass = [
     saved ? "is-saved" : "",
-    watched || progress >= 92 ? "is-watched" : "",
+    watched ? "is-watched" : "",
     itemIndex >= 0 && itemIndex < 6 ? "motion-entry" : "",
   ].filter(Boolean).join(" ");
   const entryStyle = itemIndex >= 0 && itemIndex < 6 ? ` style="--item-index: ${itemIndex};"` : "";
@@ -4765,6 +5099,14 @@ function watchProgressPercent(video) {
     return 0;
   }
   return clampNumber(progress.percent, 0, 100, 0);
+}
+
+function isVideoCompleted(video) {
+  const progress = state.watchProgressById[video?.id || ""];
+  if (!progress) {
+    return false;
+  }
+  return progress.completed === true || Number(progress.percent || 0) >= COMPLETED_WATCH_PERCENT;
 }
 
 function resumeStartSeconds(video) {
@@ -4851,6 +5193,7 @@ function icon(name) {
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
     cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
     external: '<path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    folder: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 10h18"/>',
     fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
     fullscreenExit: '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M16 3v3a2 2 0 0 0 2 2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>',
     gamepad: '<path d="M6 11h4"/><path d="M8 9v4"/><path d="M15 12h.01"/><path d="M18 10h.01"/><path d="M17.32 5H6.68a4 4 0 0 0-3.86 3l-1.1 4.4A5 5 0 0 0 6.57 18H7l2-2h6l2 2h.43a5 5 0 0 0 4.85-5.6L21.18 8a4 4 0 0 0-3.86-3Z"/>',
@@ -4865,7 +5208,6 @@ function icon(name) {
     podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
     radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
     refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
-    replay: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
@@ -5282,7 +5624,7 @@ function updateProgressFromPlayer(options = {}) {
     current: Math.round(Math.min(current, duration)),
     duration: Math.round(duration),
     percent: Math.round((options.completed ? 100 : percent) * 10) / 10,
-    completed: options.completed || percent >= 92,
+    completed: options.completed || percent >= COMPLETED_WATCH_PERCENT,
     updatedAt: Date.now(),
   };
   state.watchProgressById[videoId] = progress;
@@ -5472,15 +5814,6 @@ function playActive() {
     return;
   }
   mountPlayer(true);
-}
-
-function replayActive() {
-  if (state.player?.seekTo && state.playerVideoId === state.activeVideoId) {
-    state.player.seekTo(0, true);
-    startAutoplayPlayback(state.player, state.activeVideoId);
-    return;
-  }
-  playActive();
 }
 
 function handlePlayerError(code, videoId = state.playerVideoId) {
@@ -5728,7 +6061,17 @@ app.addEventListener("click", async (event) => {
   if (action === "home-filter") {
     const filter = target.dataset.filter || "all";
     state.homeFilter = ["all", "today", "saved"].includes(filter) ? filter : "all";
+    state.visibleRowsBySource[state.homeFilter === "saved" ? "saved" : "home"] = initialRowsForSource(state.homeFilter === "saved" ? "saved" : "home");
     render();
+  }
+  if (action === "saved-folder") {
+    state.activeSavedFolderId = sanitizeActiveSavedFolderId(target.dataset.folderId, state.savedFolders);
+    writeJson(ACTIVE_SAVED_FOLDER_KEY, state.activeSavedFolderId);
+    state.visibleRowsBySource.saved = initialRowsForSource("saved");
+    render();
+  }
+  if (action === "create-saved-folder") {
+    promptCreateSavedFolder();
   }
   if (action === "search-sort") {
     state.searchSort = sanitizeSearchSort(target.dataset.sort);
@@ -5746,9 +6089,6 @@ app.addEventListener("click", async (event) => {
   if (action === "player-fullscreen") {
     await togglePlayerFullscreen(target);
   }
-  if (action === "replay") {
-    replayActive();
-  }
   if (action === "next-video") {
     nextVideo({ autoplay: true, preserveFullscreen: true });
   }
@@ -5761,8 +6101,8 @@ app.addEventListener("click", async (event) => {
   if (action === "save") {
     toggleSaved(currentVideo().id);
   }
-  if (action === "share") {
-    await shareVideo(currentVideo());
+  if (action === "folder") {
+    openSavedFolderSheet(currentVideo().id);
   }
   if (action === "comments") {
     await loadComments(currentVideo().id);
@@ -5776,7 +6116,7 @@ app.addEventListener("click", async (event) => {
     await loadLikedVideos({ refresh: true });
   }
   if (action === "refresh-home") {
-    await loadPopularHome({ refresh: true });
+    await refreshHomeFeed();
   }
   if (action === "refresh-subs") {
     target.disabled = true;
@@ -5890,10 +6230,12 @@ document.addEventListener("keydown", (event) => {
 function handleSheet(sheet, videoId) {
   const video = videoId ? findVideo(videoId) : currentVideo();
   if (sheet === "row-more" || sheet === "video-more") {
-    openSheet(video.title, "Choose where to continue this video.", [
+    const subscribed = Boolean(state.subscriptionIdsByChannel[video.channelId]);
+    openSheet(video.title, "Manage this video inside SimaTube.", [
       { label: state.savedIds.has(video.id) ? "Remove saved" : "Save", icon: state.savedIds.has(video.id) ? "bookmark-filled" : "bookmark", action: () => { toggleSaved(video.id); closeSheet(); } },
+      { label: "Save to folder", icon: "folder", action: () => { closeSheet(); openSavedFolderSheet(video.id); } },
+      { label: subscribed ? "Unsubscribe" : "Subscribe", icon: subscribed ? "check" : "plus", action: async () => { closeSheet(); await subscribeToActiveChannel(video.channelId); } },
       { label: "Open channel", icon: "user", action: () => { closeSheet(); openChannel(video.channelId); } },
-      { label: "Open in YouTube", icon: "external", href: `${WATCH_BASE}?v=${encodeURIComponent(video.id)}` },
       { label: "Close", icon: "close", action: closeSheet },
     ]);
   }

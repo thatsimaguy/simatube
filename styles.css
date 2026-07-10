@@ -773,6 +773,110 @@ label:focus-visible {
   animation: none;
 }
 
+.home-refresh-button {
+  width: 38px;
+  height: 34px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, .08);
+  background: #141414;
+  color: var(--text);
+  cursor: pointer;
+  transition: transform var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast);
+}
+
+.home-refresh-button svg {
+  width: 19px;
+  height: 19px;
+}
+
+.home-refresh-button:hover,
+.home-refresh-button:focus-visible {
+  background: #202020;
+  border-color: rgba(255, 255, 255, .16);
+}
+
+.home-refresh-button:active {
+  transform: scale(.94) rotate(16deg);
+}
+
+.home-refresh-button[disabled],
+.home-refresh-button[aria-busy="true"] {
+  color: #8b8b8b;
+}
+
+.home-refresh-button[aria-busy="true"] svg {
+  animation: spin 900ms linear infinite;
+}
+
+.folder-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 0 12px 10px;
+  scrollbar-width: none;
+}
+
+.folder-row::-webkit-scrollbar {
+  display: none;
+}
+
+.folder-chip {
+  min-height: 34px;
+  max-width: 190px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, .08);
+  background: #151515;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.folder-chip svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.folder-chip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-chip small {
+  min-width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .1);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.folder-chip.active {
+  border-color: rgba(255, 0, 51, .5);
+  background: rgba(255, 0, 51, .16);
+}
+
+.folder-chip.create {
+  color: #f5f5f5;
+  background: #222;
+}
+
 .signin-panel {
   margin: 4px 12px 12px;
   padding: 16px;
