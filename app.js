@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-home-tabs-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-comments-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -1230,7 +1230,10 @@ async function youtubeFetch(path, params = {}, options = {}) {
     }
 
     const message = payload.error?.message || `YouTube API request failed (${response.status}).`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.reason = payload.error?.errors?.[0]?.reason || payload.error?.status || "";
+    throw error;
   }
 
   return payload;
@@ -2574,11 +2577,11 @@ async function loadComments(videoId) {
     const payload = await youtubeFetch("/commentThreads", {
       part: "snippet",
       videoId,
-      maxResults: 10,
+      maxResults: 20,
       order: "relevance",
       textFormat: "plainText",
     }, {
-      auth: Boolean(state.auth.accessToken),
+      auth: false,
       signal: controller?.signal,
     });
 
@@ -2587,8 +2590,9 @@ async function loadComments(videoId) {
       return {
         author: comment.authorDisplayName || "YouTube user",
         avatar: compactAvatarUrl(comment.authorProfileImageUrl || ""),
-        text: comment.textDisplay || "",
+        text: comment.textOriginal || comment.textDisplay || "",
         likes: Number(comment.likeCount || 0),
+        publishedAt: comment.publishedAt || "",
       };
     });
     if (loadVersion !== state.commentsLoadVersion || videoId !== state.activeVideoId) {
@@ -2604,7 +2608,7 @@ async function loadComments(videoId) {
       return false;
     }
     state.commentsStatusByVideoId[videoId] = "error";
-    state.commentsErrorByVideoId[videoId] = error.message;
+    state.commentsErrorByVideoId[videoId] = commentLoadErrorMessage(error);
     state.comments = state.commentsByVideoId[videoId] || [];
     pruneCommentsCache();
     return false;
@@ -3798,6 +3802,24 @@ function syncPlayerShellChild(retainedShell, nextShell, selector) {
   }
 }
 
+function commentLoadErrorMessage(error) {
+  const reason = String(error?.reason || "").toLowerCase();
+  const message = String(error?.message || "");
+  if (reason === "commentsdisabled" || /comments?.*disabled/i.test(message)) {
+    return "Comments are turned off for this video.";
+  }
+  if (reason === "quotaexceeded" || reason === "dailylimitexceeded" || /quota|limit/i.test(message)) {
+    return "YouTube's comment limit is used up right now. Try again later.";
+  }
+  if (Number(error?.status) === 403 || reason === "forbidden") {
+    return "YouTube would not share comments for this video.";
+  }
+  if (/api key|sign in/i.test(message)) {
+    return "Comments need the YouTube API key to be available.";
+  }
+  return message || "Comments could not load. Try again in a moment.";
+}
+
 function refreshWatchAfterInlinePlayerSwitch() {
   const currentWatch = app.querySelector(".watch-view");
   const currentShell = currentWatch?.querySelector(".player-shell");
@@ -4271,7 +4293,10 @@ function renderComments(videoId) {
           <div>
             <strong>${escapeHtml(comment.author)}</strong>
             <p>${escapeHtml(comment.text)}</p>
-            <span>${Number(comment.likes).toLocaleString()} ${Number(comment.likes) === 1 ? "like" : "likes"}</span>
+            <span>${escapeHtml([
+              comment.publishedAt ? timeAgo(comment.publishedAt) : "",
+              `${Number(comment.likes).toLocaleString()} ${Number(comment.likes) === 1 ? "like" : "likes"}`,
+            ].filter(Boolean).join(" \u2022 "))}</span>
           </div>
         </article>
       `).join("")}
