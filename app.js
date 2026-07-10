@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-refresh-icon-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-refresh-icon-clean-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -5211,7 +5211,7 @@ function icon(name) {
     podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
     radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
     refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
-    refreshHome: '<path d="M4 12a8 8 0 0 1 13.7-5.6" stroke-width="3.8"/><path d="M17.8 4.1h2.6v5.1h-5.1" stroke-width="3.8"/><path d="M20 12a8 8 0 0 1-13.7 5.6" stroke-width="3.8"/><path d="M6.2 19.9H3.6v-5.1h5.1" stroke-width="3.8"/>',
+    refreshHome: '<path d="M3.2 12.2A8.8 8.8 0 0 1 18 5.8" stroke-width="3.15"/><path d="M17.45 2.9h3.35c.55 0 .85.66.46 1.05L19.6 5.6l1.6 1.6c.39.39.11 1.05-.44 1.05h-5.1c-.38 0-.68-.3-.68-.68v-5.1c0-.55.66-.83 1.05-.44l1.42 1.43Z" fill="currentColor" stroke="none"/><path d="M20.8 11.8A8.8 8.8 0 0 1 6 18.2" stroke-width="3.15"/><path d="M6.55 21.1H3.2c-.55 0-.85-.66-.46-1.05L4.4 18.4l-1.6-1.6c-.39-.39-.11-1.05.44-1.05h5.1c.38 0 .68.3.68.68v5.1c0 .55-.66.83-1.05.44l-1.42-1.43Z" fill="currentColor" stroke="none"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
