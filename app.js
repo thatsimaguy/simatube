@@ -2,24 +2,28 @@ const READ_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
 const WRITE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl";
 const API_BASE = "https://www.googleapis.com/youtube/v3";
 const WATCH_BASE = "https://www.youtube.com/watch";
+const IS_IOS_WEBKIT = /iphone|ipad|ipod/i.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const IS_MEMORY_CONSTRAINED_MOBILE = IS_IOS_WEBKIT
+  || (window.matchMedia?.("(pointer: coarse)")?.matches && Number(navigator.deviceMemory || 8) <= 4);
 const MIN_FEED_DURATION_SECONDS = 61;
-const MAX_DISCOVERY_QUERIES = 4;
-const MAX_SUBSCRIPTION_UPLOAD_CHANNELS = 12;
-const MAX_SUBSCRIPTION_VIDEO_ROWS = 36;
-const PLAYLIST_FETCH_BATCH_SIZE = 4;
+const MAX_DISCOVERY_QUERIES = IS_MEMORY_CONSTRAINED_MOBILE ? 2 : 4;
+const MAX_SUBSCRIPTION_UPLOAD_CHANNELS = IS_MEMORY_CONSTRAINED_MOBILE ? 6 : 10;
+const MAX_SUBSCRIPTION_VIDEO_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 18 : 30;
+const PLAYLIST_FETCH_BATCH_SIZE = IS_MEMORY_CONSTRAINED_MOBILE ? 2 : 3;
 const SUBSCRIPTION_PLAYLIST_TIMEOUT_MS = 9000;
-const RECOVERY_SUBSCRIPTION_UPLOAD_CHANNELS = 6;
+const RECOVERY_SUBSCRIPTION_UPLOAD_CHANNELS = IS_MEMORY_CONSTRAINED_MOBILE ? 4 : 6;
 const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const CACHE_CLEANUP_VERSION = "2026-07-v3";
+const CACHE_CLEANUP_VERSION = "2026-07-v4";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 1;
 const PERSONAL_CACHE_FRESH_MS = 30 * 60 * 1000;
 const PERSONAL_CACHE_MAX_STALE_MS = 7 * 24 * 60 * 60 * 1000;
-const INITIAL_VIDEO_ROWS = 12;
-const VIDEO_ROWS_INCREMENT = 10;
+const INITIAL_VIDEO_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
+const VIDEO_ROWS_INCREMENT = IS_MEMORY_CONSTRAINED_MOBILE ? 6 : 8;
 const MAX_VIDEO_CACHE_ENTRIES = 240;
 const MAX_CHANNEL_CACHE_ENTRIES = 120;
 const MAX_CHANNEL_VIDEO_CACHES = 12;
@@ -27,8 +31,8 @@ const MAX_SEARCH_CACHE_ENTRIES = 8;
 const MAX_COMMENTS_CACHE_ENTRIES = 6;
 const MAX_SAVED_VIDEOS = 50;
 const LIBRARY_INITIAL_VIDEO_ROWS = 6;
-const INITIAL_SUBSCRIPTION_CHANNELS = 10;
-const SUBSCRIPTION_CHANNEL_INCREMENT = 10;
+const INITIAL_SUBSCRIPTION_CHANNELS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
+const SUBSCRIPTION_CHANNEL_INCREMENT = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
 
 const demoVideos = [
   {
@@ -109,6 +113,10 @@ const recoveringFromFastReload = beginBootGuard();
 let googleIdentityLoadPromise = null;
 let serverSessionRefreshPromise = null;
 let pendingRenderFocus = null;
+let bootStableTimer = 0;
+let portraitLockTimer = 0;
+let portraitLockPromise = null;
+let lastPortraitLockAttempt = 0;
 const storedSavedVideos = readArray("yt_saved_videos")
   .map(compactStoredVideo)
   .filter((video) => video?.id)
@@ -174,9 +182,15 @@ const state = {
   feedLoading: false,
   subscriptionsLoaded: false,
   subscriptionLoadPromise: null,
+  subscriptionLoadVersion: 0,
+  subscriptionAbortController: null,
   homeFeedLoaded: false,
   homeFeedLoadPromise: null,
   homeFeedLoadScheduled: false,
+  homeFeedLoadVersion: 0,
+  homeFeedAbortController: null,
+  homeFeedStatus: "idle",
+  homeFeedError: "",
   usingCachedPersonalFeed: false,
   visibleRowsBySource: {},
   visibleSubscriptionChannels: INITIAL_SUBSCRIPTION_CHANNELS,
@@ -208,6 +222,11 @@ boot();
 clearOldServiceWorkers();
 window.addEventListener("pagehide", (event) => {
   clearPlayerFullscreenControlsTimer();
+  cancelSubscriptionRequest();
+  cancelHomeFeedRequest();
+  cancelSearchRequest();
+  cancelCommentsRequest();
+  cancelChannelRequest();
   if (event.persisted) {
     state.player?.pauseVideo?.();
     return;
@@ -232,7 +251,15 @@ function normalizeConfig(config) {
   };
 }
 
+function isLocalDevelopmentHost() {
+  return location.protocol === "file:"
+    || ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
+}
+
 async function loadOptionalLocalConfig() {
+  if (!isLocalDevelopmentHost()) {
+    return;
+  }
   try {
     const response = await fetch(`./config.local.js?t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
@@ -267,7 +294,7 @@ function boot() {
   window.requestAnimationFrame(resetScroll);
   setupPortraitOrientationLock();
   setupNetworkStatus();
-  window.setTimeout(markBootStable, BOOT_STABLE_DELAY_MS);
+  scheduleBootStabilityCheck();
   if (state.view === "channel" && state.activeChannelId) {
     loadActiveChannel({ quiet: true });
   }
@@ -294,12 +321,11 @@ function boot() {
 }
 
 function setupPortraitOrientationLock() {
-  tryLockPortraitOrientation();
-  window.addEventListener("resize", tryLockPortraitOrientation);
-  window.addEventListener("orientationchange", tryLockPortraitOrientation);
+  schedulePortraitOrientationLock(0, true);
+  window.addEventListener("orientationchange", () => schedulePortraitOrientationLock(250, true), { passive: true });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
-      tryLockPortraitOrientation();
+      schedulePortraitOrientationLock(250);
     }
   });
 }
@@ -312,6 +338,9 @@ function setupNetworkStatus() {
   syncStatus();
   window.addEventListener("offline", () => {
     syncStatus();
+    if (state.view === "home") {
+      state.homeFeedStatus = "offline";
+    }
     showToast("You're offline. Watch history stays available.");
   });
   window.addEventListener("online", async () => {
@@ -324,22 +353,50 @@ function setupNetworkStatus() {
       await restoreServerSession();
       return;
     }
-    if (state.view === "home" && !state.homeFeed.length && hasApiAccess()) {
-      loadPopularHome();
+    if (state.view === "home"
+      && !state.auth.accessToken
+      && hasApiAccess()
+      && (!state.homeFeedLoaded || ["offline", "error"].includes(state.homeFeedStatus))) {
+      loadPopularHome({ refresh: true });
     }
   });
 }
 
-function tryLockPortraitOrientation() {
+function schedulePortraitOrientationLock(delay = 0, force = false) {
+  window.clearTimeout(portraitLockTimer);
+  portraitLockTimer = window.setTimeout(() => tryLockPortraitOrientation(force), delay);
+}
+
+function tryLockPortraitOrientation(force = false) {
+  const now = Date.now();
+  if (portraitLockPromise || (!force && now - lastPortraitLockAttempt < 4000)) {
+    return portraitLockPromise;
+  }
+  const lock = screen.orientation?.lock;
+  if (typeof lock !== "function") {
+    return null;
+  }
+
+  lastPortraitLockAttempt = now;
   try {
-    screen.orientation?.lock?.("portrait")?.catch?.(() => {});
+    const request = lock.call(screen.orientation, "portrait");
+    if (!request?.then) {
+      return null;
+    }
+    portraitLockPromise = Promise.resolve(request)
+      .catch(() => false)
+      .finally(() => {
+        portraitLockPromise = null;
+      });
+    return portraitLockPromise;
   } catch {
     // Normal browser tabs can reject orientation locks; the CSS blocker handles that case.
+    return null;
   }
 }
 
 async function restoreServerSession() {
-  if (!state.config.serverOAuthEnabled) {
+  if (!state.config.serverOAuthEnabled || state.demoMode) {
     return false;
   }
 
@@ -428,17 +485,49 @@ async function fetchWithTimeout(input, options = {}, timeoutMs = 10000) {
   if (navigator.onLine === false) {
     throw new Error("You're offline. Try again when your connection returns.");
   }
-  if (!("AbortController" in window) || options.signal) {
-    return fetch(input, options);
+  const timedAbort = createTimedAbort(options.signal, timeoutMs);
+  try {
+    return await fetch(input, { ...options, signal: timedAbort.signal || options.signal });
+  } catch (error) {
+    if (error?.name === "AbortError" && timedAbort.didTimeout()) {
+      throw new Error("The request took too long. Try again.");
+    }
+    throw error;
+  } finally {
+    timedAbort.cleanup();
+  }
+}
+
+function createTimedAbort(externalSignal, timeoutMs = REQUEST_TIMEOUT_MS) {
+  if (!("AbortController" in window)) {
+    return {
+      signal: externalSignal,
+      didTimeout: () => false,
+      cleanup: () => {},
+    };
   }
 
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { ...options, signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeoutId);
+  let timedOut = false;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) {
+    abortFromExternal();
+  } else {
+    externalSignal?.addEventListener?.("abort", abortFromExternal, { once: true });
   }
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      window.clearTimeout(timeoutId);
+      externalSignal?.removeEventListener?.("abort", abortFromExternal);
+    },
+  };
 }
 
 function applyServerSession(session) {
@@ -544,13 +633,19 @@ function scheduleInitialPersonalLoad(cacheStatus = {}) {
     return;
   }
 
-  const start = () => loadSubscriptionsAndFeed({
-    quiet: true,
-    includeHome: state.view === "home",
-    conservative: state.recoveryMode,
-    refresh: Boolean(cacheStatus.restored),
-    background: Boolean(cacheStatus.restored),
-  });
+  const authVersion = state.authVersion;
+  const start = () => {
+    if (authVersion !== state.authVersion || !state.auth.accessToken || state.demoMode) {
+      return false;
+    }
+    return loadSubscriptionsAndFeed({
+      quiet: true,
+      includeHome: state.view === "home",
+      conservative: state.recoveryMode || IS_MEMORY_CONSTRAINED_MOBILE,
+      refresh: Boolean(cacheStatus.restored),
+      background: Boolean(cacheStatus.restored),
+    });
+  };
 
   if (state.recoveryMode) {
     window.setTimeout(start, 1200);
@@ -612,17 +707,21 @@ function restorePersonalCache(profileId) {
     return { restored: false, subscriptionsFresh: false, homeFresh: false };
   }
 
+  const recoveryChannelLimit = state.recoveryMode ? 20 : 50;
+  const recoveryVideoLimit = state.recoveryMode ? Math.min(12, MAX_SUBSCRIPTION_VIDEO_ROWS) : MAX_SUBSCRIPTION_VIDEO_ROWS;
+  const recoveryHomeLimit = state.recoveryMode ? 16 : 40;
+  const recoveryLikedLimit = state.recoveryMode ? 8 : 25;
   const subscriptions = subscriptionsUsable && Array.isArray(cached.subscriptions)
-    ? cached.subscriptions.map(compactStoredChannel).filter((channel) => channel?.id).slice(0, 50)
+    ? cached.subscriptions.map(compactStoredChannel).filter((channel) => channel?.id).slice(0, recoveryChannelLimit)
     : [];
   const subscriptionVideos = subscriptionsUsable && Array.isArray(cached.subscriptionVideos)
-    ? cached.subscriptionVideos.map(compactStoredVideo).filter((video) => video?.id).slice(0, MAX_SUBSCRIPTION_VIDEO_ROWS)
+    ? cached.subscriptionVideos.map(compactStoredVideo).filter((video) => video?.id).slice(0, recoveryVideoLimit)
     : [];
   const homeFeed = homeUsable && Array.isArray(cached.homeFeed)
-    ? cached.homeFeed.map(compactStoredVideo).filter((video) => video?.id).slice(0, 40)
+    ? cached.homeFeed.map(compactStoredVideo).filter((video) => video?.id).slice(0, recoveryHomeLimit)
     : [];
   const likedVideos = Array.isArray(cached.likedVideos)
-    ? cached.likedVideos.map(compactStoredVideo).filter((video) => video?.id).slice(0, 25)
+    ? cached.likedVideos.map(compactStoredVideo).filter((video) => video?.id).slice(0, recoveryLikedLimit)
     : [];
   const subscriptionsFresh = subscriptionsUsable
     && cached.subscriptionsLoaded === true
@@ -642,6 +741,8 @@ function restorePersonalCache(profileId) {
   state.feedReasonsById = stringRecord(cached.feedReasonsById);
   state.subscriptionsLoaded = Boolean(subscriptionsUsable && cached.subscriptionsLoaded);
   state.homeFeedLoaded = homeFresh;
+  state.homeFeedStatus = homeFresh ? "ready" : state.homeFeed.length ? "stale" : "idle";
+  state.homeFeedError = "";
   state.feedLoading = false;
   state.usingCachedPersonalFeed = true;
   cacheChannels(subscriptions);
@@ -753,7 +854,25 @@ function beginBootGuard() {
   }
 }
 
+function scheduleBootStabilityCheck(delay = BOOT_STABLE_DELAY_MS) {
+  window.clearTimeout(bootStableTimer);
+  bootStableTimer = window.setTimeout(() => {
+    const heavyWorkActive = Boolean(
+      state.subscriptionLoadPromise
+      || state.homeFeedLoadPromise
+      || state.feedLoading,
+    );
+    if (heavyWorkActive) {
+      scheduleBootStabilityCheck(5000);
+      return;
+    }
+    markBootStable();
+  }, delay);
+}
+
 function markBootStable() {
+  window.clearTimeout(bootStableTimer);
+  bootStableTimer = 0;
   try {
     sessionStorage.removeItem("yt_boot_pending_at");
   } catch {
@@ -994,10 +1113,7 @@ async function youtubeFetch(path, params = {}, options = {}) {
     throw new Error("Add an API key or sign in first.");
   }
 
-  const controller = !options.signal && "AbortController" in window ? new AbortController() : null;
-  const timeoutId = controller
-    ? window.setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS)
-    : 0;
+  const timedAbort = createTimedAbort(options.signal, options.timeoutMs || REQUEST_TIMEOUT_MS);
   let response;
 
   try {
@@ -1005,7 +1121,7 @@ async function youtubeFetch(path, params = {}, options = {}) {
       method: options.method || "GET",
       headers,
       body: options.body,
-      signal: options.signal || controller?.signal,
+      signal: timedAbort.signal || options.signal,
     });
   } catch (error) {
     if (error?.name === "AbortError") {
@@ -1014,13 +1130,13 @@ async function youtubeFetch(path, params = {}, options = {}) {
         cancelled.name = "AbortError";
         throw cancelled;
       }
-      throw new Error("YouTube took too long to respond. Try again.");
+      if (timedAbort.didTimeout()) {
+        throw new Error("YouTube took too long to respond. Try again.");
+      }
     }
     throw error;
   } finally {
-    if (timeoutId) {
-      window.clearTimeout(timeoutId);
-    }
+    timedAbort.cleanup();
   }
 
   if (response.status === 204) {
@@ -1056,8 +1172,10 @@ async function listAll(path, params, options = {}, limit = 50) {
   return items.slice(0, limit);
 }
 
-async function loadPopularHome() {
-  if (state.auth.accessToken || state.homeFeedLoaded || state.loading === "Loading Home") {
+async function loadPopularHome(options = {}) {
+  if (state.auth.accessToken
+    || (state.homeFeedLoaded && !options.refresh)
+    || state.loading === "Loading Home") {
     return;
   }
   if (navigator.onLine === false) {
@@ -1067,11 +1185,16 @@ async function loadPopularHome() {
       ? cachedFeed
       : state.localHistory.length ? state.localHistory : demoVideos;
     state.queue = state.homeFeed;
+    state.homeFeedLoaded = false;
+    state.homeFeedStatus = "offline";
+    state.homeFeedError = "Reconnect to refresh Home.";
     render();
     return;
   }
 
-  state.feedLoading = true;
+  state.feedLoading = !state.homeFeed.length;
+  state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
+  state.homeFeedError = "";
   setLoading("Loading Home");
   try {
     const popularVideos = await loadPopularVideos();
@@ -1079,16 +1202,23 @@ async function loadPopularHome() {
     state.homeFeed = rankedPopular.length ? rankedPopular : demoVideos;
     state.queue = state.homeFeed;
     state.homeFeedLoaded = true;
+    state.homeFeedStatus = "ready";
+    state.homeFeedError = "";
     state.usingCachedPersonalFeed = false;
     state.error = "";
   } catch (error) {
     state.error = error.message;
-    state.homeFeed = demoVideos;
-    state.queue = demoVideos;
-    state.homeFeedLoaded = true;
+    state.homeFeedError = error.message;
+    state.homeFeedStatus = "error";
+    state.homeFeed = state.homeFeed.length
+      ? state.homeFeed
+      : state.localHistory.length ? state.localHistory : demoVideos;
+    state.queue = state.homeFeed;
+    state.homeFeedLoaded = false;
   } finally {
     state.feedLoading = false;
     clearLoading();
+    scheduleBootStabilityCheck(2000);
   }
 }
 
@@ -1134,6 +1264,9 @@ async function signIn() {
     resetScroll();
     showToast("Signed in.");
   } catch (error) {
+    if (authVersion !== state.authVersion) {
+      return;
+    }
     openSheet("Sign in did not finish", error.message, [{ label: "Close", action: closeSheet }]);
   } finally {
     clearLoading();
@@ -1142,6 +1275,8 @@ async function signIn() {
 
 async function signOut() {
   cancelPendingPlayerApiLoad();
+  cancelSubscriptionRequest();
+  cancelHomeFeedRequest();
   cancelSearchRequest();
   cancelCommentsRequest();
   cancelChannelRequest();
@@ -1150,7 +1285,7 @@ async function signOut() {
   state.searchLoadVersion += 1;
   state.commentsLoadVersion += 1;
   state.channelLoadVersion += 1;
-  await clearServerSession();
+  const logoutRequest = clearServerSession();
   state.auth.accessToken = "";
   state.auth.scopes.clear();
   state.auth.profile = null;
@@ -1175,12 +1310,22 @@ async function signOut() {
   state.subscriptionLoadPromise = null;
   state.homeFeedLoadPromise = null;
   state.homeFeedLoadScheduled = false;
+  state.homeFeedAbortController = null;
   state.pendingActions.clear();
   state.rememberSignIn = false;
   state.reconnectFailed = false;
   state.feedLoading = false;
   state.usingCachedPersonalFeed = false;
   state.loading = "";
+  state.homeFeedStatus = "idle";
+  state.homeFeedError = "";
+  state.error = "";
+  state.subscriptionWarning = "";
+  state.feedReasonsById = {};
+  state.ratings = {};
+  state.homeFilter = "all";
+  state.visibleRowsBySource = {};
+  state.visibleSubscriptionChannels = INITIAL_SUBSCRIPTION_CHANNELS;
   state.homeFeed = demoVideos;
   state.queue = demoVideos;
   state.view = "home";
@@ -1190,10 +1335,13 @@ async function signOut() {
   showToast("Signed out.");
   render();
   resetScroll();
+  await logoutRequest;
 }
 
 function continueDemo() {
   clearPersonalCache();
+  cancelSubscriptionRequest();
+  cancelHomeFeedRequest();
   cancelSearchRequest();
   cancelCommentsRequest();
   cancelChannelRequest();
@@ -1212,6 +1360,7 @@ function continueDemo() {
   state.homeFeedLoaded = false;
   state.homeFeedLoadPromise = null;
   state.homeFeedLoadScheduled = false;
+  state.homeFeedAbortController = null;
   state.onboarded = true;
   state.demoMode = true;
   state.rememberSignIn = false;
@@ -1224,6 +1373,15 @@ function continueDemo() {
   state.searchResults = [];
   state.searchStatus = "idle";
   state.query = "";
+  state.homeFeedStatus = "ready";
+  state.homeFeedError = "";
+  state.error = "";
+  state.subscriptionWarning = "";
+  state.feedReasonsById = {};
+  state.ratings = {};
+  state.homeFilter = "all";
+  state.visibleRowsBySource = {};
+  state.visibleSubscriptionChannels = INITIAL_SUBSCRIPTION_CHANNELS;
   state.homeFeed = demoVideos;
   state.queue = demoVideos;
   state.view = "home";
@@ -1270,6 +1428,9 @@ async function restoreSignIn() {
     writeJson("yt_remember_youtube_signin", true);
     showToast("Signed back in.");
   } catch {
+    if (authVersion !== state.authVersion) {
+      return;
+    }
     state.auth.accessToken = "";
     state.auth.scopes.clear();
     state.auth.profile = null;
@@ -1309,15 +1470,25 @@ async function loadMe(expectedAuthVersion = state.authVersion) {
   return true;
 }
 
+function cancelSubscriptionRequest() {
+  state.subscriptionLoadVersion += 1;
+  state.subscriptionAbortController?.abort();
+  state.subscriptionAbortController = null;
+}
+
 function loadSubscriptionsAndFeed(options = {}) {
   if (state.subscriptionLoadPromise) {
     return state.subscriptionLoadPromise;
   }
 
   const authVersion = state.authVersion;
-  const request = performSubscriptionLoad(options)
+  const loadVersion = state.subscriptionLoadVersion + 1;
+  const controller = "AbortController" in window ? new AbortController() : null;
+  state.subscriptionLoadVersion = loadVersion;
+  state.subscriptionAbortController = controller;
+  const request = performSubscriptionLoad({ ...options, signal: controller?.signal }, loadVersion)
     .catch((error) => {
-      if (authVersion !== state.authVersion) {
+      if (error?.name === "AbortError" || authVersion !== state.authVersion || loadVersion !== state.subscriptionLoadVersion) {
         return false;
       }
       state.feedLoading = false;
@@ -1337,6 +1508,10 @@ function loadSubscriptionsAndFeed(options = {}) {
     .finally(() => {
       if (state.subscriptionLoadPromise === request) {
         state.subscriptionLoadPromise = null;
+        if (state.subscriptionAbortController === controller) {
+          state.subscriptionAbortController = null;
+        }
+        scheduleBootStabilityCheck(2000);
         if (state.view === "subscriptions" || state.view === "home") {
           render();
         }
@@ -1347,10 +1522,13 @@ function loadSubscriptionsAndFeed(options = {}) {
   return request;
 }
 
-async function performSubscriptionLoad(options = {}) {
+async function performSubscriptionLoad(options = {}, loadVersion = state.subscriptionLoadVersion) {
   const authVersion = state.authVersion;
   await ensureReadAuth(options.authOptions || {});
-  if (authVersion !== state.authVersion || !state.auth.accessToken) {
+  if (authVersion !== state.authVersion
+    || loadVersion !== state.subscriptionLoadVersion
+    || options.signal?.aborted
+    || !state.auth.accessToken) {
     return false;
   }
 
@@ -1369,8 +1547,8 @@ async function performSubscriptionLoad(options = {}) {
       mine: "true",
       maxResults: 50,
       order: "unread",
-    }, { auth: true }, state.config.maxSubscriptionChannels);
-    if (authVersion !== state.authVersion) {
+    }, { auth: true, signal: options.signal }, state.config.maxSubscriptionChannels);
+    if (authVersion !== state.authVersion || loadVersion !== state.subscriptionLoadVersion || options.signal?.aborted) {
       return false;
     }
 
@@ -1385,12 +1563,12 @@ async function performSubscriptionLoad(options = {}) {
     const channelIds = subs.map((sub) => sub.snippet?.resourceId?.channelId).filter(Boolean);
     let channels = [];
     try {
-      channels = await loadChannels(channelIds);
+      channels = await loadChannels(channelIds, { auth: true, signal: options.signal });
     } catch {
       channels = subs.map(normalizeSubscriptionChannel).filter(Boolean);
       cacheChannels(channels);
     }
-    if (authVersion !== state.authVersion) {
+    if (authVersion !== state.authVersion || loadVersion !== state.subscriptionLoadVersion || options.signal?.aborted) {
       return false;
     }
     state.subscriptions = channels;
@@ -1405,8 +1583,10 @@ async function performSubscriptionLoad(options = {}) {
       uploadChannels,
       state.config.uploadsPerChannel,
       authVersion,
+      loadVersion,
+      options.signal,
     );
-    if (authVersion !== state.authVersion) {
+    if (authVersion !== state.authVersion || loadVersion !== state.subscriptionLoadVersion || options.signal?.aborted) {
       return false;
     }
 
@@ -1422,12 +1602,16 @@ async function performSubscriptionLoad(options = {}) {
     const uniqueVideoIds = [...new Set(uploadVideoIds)].slice(0, MAX_SUBSCRIPTION_VIDEO_ROWS);
     let subscribedVideos = [];
     try {
-      subscribedVideos = await loadVideoDetails(uniqueVideoIds, { auth: true, refresh: options.refresh });
+      subscribedVideos = await loadVideoDetails(uniqueVideoIds, {
+        auth: true,
+        refresh: options.refresh,
+        signal: options.signal,
+      });
     } catch {
       subscribedVideos = [];
       state.subscriptionWarning = "Newest uploads could not load. Your channel list is still available.";
     }
-    if (authVersion !== state.authVersion) {
+    if (authVersion !== state.authVersion || loadVersion !== state.subscriptionLoadVersion || options.signal?.aborted) {
       return false;
     }
 
@@ -1439,6 +1623,7 @@ async function performSubscriptionLoad(options = {}) {
 
     if (!state.homeFeed.length && state.subscriptionVideos.length) {
       state.homeFeed = state.subscriptionVideos.slice(0, 40);
+      state.homeFeedStatus = "stale";
       state.feedReasonsById = Object.fromEntries(
         state.homeFeed.map((video) => [video.id, "From your channels"]),
       );
@@ -1452,7 +1637,10 @@ async function performSubscriptionLoad(options = {}) {
     markBootStable();
     return true;
   } catch (error) {
-    if (authVersion !== state.authVersion) {
+    if (error?.name === "AbortError"
+      || authVersion !== state.authVersion
+      || loadVersion !== state.subscriptionLoadVersion
+      || options.signal?.aborted) {
       return false;
     }
     state.error = error.message;
@@ -1461,7 +1649,7 @@ async function performSubscriptionLoad(options = {}) {
     }
     return false;
   } finally {
-    if (authVersion === state.authVersion) {
+    if (authVersion === state.authVersion && loadVersion === state.subscriptionLoadVersion) {
       state.feedLoading = false;
       if (state.loading === "Loading subscriptions" || state.loading === "Refreshing subscriptions") {
         state.loading = "";
@@ -1470,11 +1658,17 @@ async function performSubscriptionLoad(options = {}) {
   }
 }
 
-async function loadSubscriptionPlaylistItems(channels, uploadsPerChannel, authVersion = state.authVersion) {
+async function loadSubscriptionPlaylistItems(
+  channels,
+  uploadsPerChannel,
+  authVersion = state.authVersion,
+  loadVersion = state.subscriptionLoadVersion,
+  signal,
+) {
   const results = [];
 
   for (let index = 0; index < channels.length; index += PLAYLIST_FETCH_BATCH_SIZE) {
-    if (authVersion !== state.authVersion) {
+    if (authVersion !== state.authVersion || loadVersion !== state.subscriptionLoadVersion || signal?.aborted) {
       break;
     }
     const batch = channels.slice(index, index + PLAYLIST_FETCH_BATCH_SIZE);
@@ -1483,12 +1677,12 @@ async function loadSubscriptionPlaylistItems(channels, uploadsPerChannel, authVe
         part: "snippet,contentDetails",
         playlistId: channel.uploadsPlaylistId,
         maxResults: uploadsPerChannel,
-      }, { auth: true, timeoutMs: SUBSCRIPTION_PLAYLIST_TIMEOUT_MS })),
+      }, { auth: true, timeoutMs: SUBSCRIPTION_PLAYLIST_TIMEOUT_MS, signal })),
     );
     results.push(...batchResults);
 
     if (index + PLAYLIST_FETCH_BATCH_SIZE < channels.length) {
-      await new Promise((resolve) => window.setTimeout(resolve, 60));
+      await new Promise((resolve) => window.setTimeout(resolve, IS_MEMORY_CONSTRAINED_MOBILE ? 120 : 80));
     }
   }
 
@@ -1506,6 +1700,13 @@ function waitForIdleFrame() {
   });
 }
 
+function cancelHomeFeedRequest() {
+  state.homeFeedLoadVersion += 1;
+  state.homeFeedAbortController?.abort();
+  state.homeFeedAbortController = null;
+  state.homeFeedLoadScheduled = false;
+}
+
 function scheduleHomeFeedEnrichment(options = {}) {
   if ((state.homeFeedLoaded && !options.refresh)
     || state.homeFeedLoadPromise
@@ -1514,10 +1715,15 @@ function scheduleHomeFeedEnrichment(options = {}) {
     return;
   }
 
+  const authVersion = state.authVersion;
+  const loadVersion = state.homeFeedLoadVersion;
   state.homeFeedLoadScheduled = true;
   waitForIdleFrame().then(() => {
     state.homeFeedLoadScheduled = false;
-    if (!state.auth.accessToken) {
+    if (authVersion !== state.authVersion
+      || loadVersion !== state.homeFeedLoadVersion
+      || !state.auth.accessToken
+      || state.demoMode) {
       return false;
     }
     return loadPersonalHomeFeed(options);
@@ -1535,9 +1741,20 @@ function loadPersonalHomeFeed(options = {}) {
   }
 
   const authVersion = state.authVersion;
-  const request = buildPersonalHomeFeed(state.subscriptionVideos, options)
+  const loadVersion = state.homeFeedLoadVersion + 1;
+  const controller = "AbortController" in window ? new AbortController() : null;
+  state.homeFeedLoadVersion = loadVersion;
+  state.homeFeedAbortController = controller;
+  state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
+  state.homeFeedError = "";
+  const request = buildPersonalHomeFeed(state.subscriptionVideos, {
+    ...options,
+    signal: controller?.signal,
+  })
     .then((feed) => {
-      if (authVersion !== state.authVersion) {
+      if (authVersion !== state.authVersion
+        || loadVersion !== state.homeFeedLoadVersion
+        || controller?.signal.aborted) {
         return false;
       }
       if (feed.length) {
@@ -1547,17 +1764,37 @@ function loadPersonalHomeFeed(options = {}) {
           state.queue = feed;
         }
         state.homeFeedLoaded = true;
+        state.homeFeedStatus = "ready";
+        state.homeFeedError = "";
         savePersonalCache({ home: true });
+      } else {
+        state.homeFeedStatus = state.homeFeed.length ? "stale" : "error";
+        state.homeFeedError = "Home could not refresh yet.";
       }
       if (state.view === "home") {
         render();
       }
       return Boolean(feed.length);
     })
-    .catch(() => false)
+    .catch((error) => {
+      if (authVersion === state.authVersion
+        && loadVersion === state.homeFeedLoadVersion
+        && error?.name !== "AbortError") {
+        state.homeFeedStatus = state.homeFeed.length ? "stale" : "error";
+        state.homeFeedError = error?.message || "Home could not refresh yet.";
+        if (state.view === "home") {
+          render();
+        }
+      }
+      return false;
+    })
     .finally(() => {
       if (state.homeFeedLoadPromise === request) {
         state.homeFeedLoadPromise = null;
+        if (state.homeFeedAbortController === controller) {
+          state.homeFeedAbortController = null;
+        }
+        scheduleBootStabilityCheck(2000);
       }
     });
 
@@ -1567,11 +1804,14 @@ function loadPersonalHomeFeed(options = {}) {
 
 async function buildPersonalHomeFeed(subscribedVideos = [], options = {}) {
   const likedVideos = await loadLikedVideoSeeds(options);
+  if (options.signal?.aborted) {
+    return [];
+  }
   state.likedVideos = likedVideos;
 
   const [discoveryResult, popularResult] = await Promise.allSettled([
-    loadInterestDiscoveryVideos(),
-    loadPopularVideos({ auth: true }),
+    loadInterestDiscoveryVideos(options),
+    loadPopularVideos({ auth: true, signal: options.signal }),
   ]);
   const discoveryVideos = discoveryResult.status === "fulfilled" ? discoveryResult.value : [];
   const popularVideos = popularResult.status === "fulfilled" ? popularResult.value : [];
@@ -1593,10 +1833,13 @@ async function loadLikedVideoSeeds(options = {}) {
     const payload = await youtubeFetch("/videos", {
       part: "snippet,contentDetails,statistics",
       myRating: "like",
-      maxResults: 25,
-    }, { auth: true });
+      maxResults: IS_MEMORY_CONSTRAINED_MOBILE ? 15 : 25,
+    }, { auth: true, signal: options.signal });
     const videos = (payload.items || []).map(normalizeVideoResource);
-    const hydrated = await hydrateVideoChannelThumbnails(videos, { auth: true });
+    const hydrated = await hydrateVideoChannelThumbnails(videos, {
+      auth: true,
+      signal: options.signal,
+    });
     state.likedVideos = hydrated;
     state.likedVideosLoaded = true;
     return hydrated;
@@ -1606,21 +1849,17 @@ async function loadLikedVideoSeeds(options = {}) {
 }
 
 async function loadPopularVideos(options = {}) {
-  try {
-    const payload = await youtubeFetch("/videos", {
-      part: "snippet,contentDetails,statistics",
-      chart: "mostPopular",
-      regionCode: state.config.regionCode,
-      maxResults: 25,
-    }, options);
-    const videos = (payload.items || []).map(normalizeVideoResource);
-    return hydrateVideoChannelThumbnails(videos);
-  } catch {
-    return [];
-  }
+  const payload = await youtubeFetch("/videos", {
+    part: "snippet,contentDetails,statistics",
+    chart: "mostPopular",
+    regionCode: state.config.regionCode,
+    maxResults: IS_MEMORY_CONSTRAINED_MOBILE ? 15 : 25,
+  }, options);
+  const videos = (payload.items || []).map(normalizeVideoResource);
+  return hydrateVideoChannelThumbnails(videos, options);
 }
 
-async function loadInterestDiscoveryVideos() {
+async function loadInterestDiscoveryVideos(options = {}) {
   const queries = recommendationQueries();
   if (!queries.length || !hasApiAccess()) {
     return [];
@@ -1635,7 +1874,7 @@ async function loadInterestDiscoveryVideos() {
       maxResults: 8,
       regionCode: state.config.regionCode,
       order: "relevance",
-    }, { auth: Boolean(state.auth.accessToken) })),
+    }, { auth: Boolean(state.auth.accessToken), signal: options.signal })),
   );
 
   const ids = [...new Set(searchResults
@@ -1643,7 +1882,10 @@ async function loadInterestDiscoveryVideos() {
     .map((item) => item.id?.videoId)
     .filter(Boolean))];
 
-  return loadVideoDetails(ids.slice(0, 30), { auth: Boolean(state.auth.accessToken) });
+  return loadVideoDetails(ids.slice(0, IS_MEMORY_CONSTRAINED_MOBILE ? 16 : 30), {
+    auth: Boolean(state.auth.accessToken),
+    signal: options.signal,
+  });
 }
 
 function recommendationQueries() {
@@ -1676,20 +1918,23 @@ function cleanRecommendationQuery(value = "") {
 function rankHomeCandidates(candidates) {
   const watchedIds = new Set(state.localHistory.map((video) => video.id));
   const unique = dedupeCandidates(candidates)
-    .filter(({ video }) => video.id && !isLikelyShort(video))
-    .filter(({ video }) => !watchedIds.has(video.id));
+    .filter(({ video }) => video.id && !isLikelyShort(video));
 
   const interestTerms = interestTokenSet();
   const scored = unique
     .map((candidate) => ({
       ...candidate,
-      score: homeScore(candidate.video, candidate.source, interestTerms),
+      score: homeScore(candidate.video, candidate.source, interestTerms)
+        - (watchedIds.has(candidate.video.id) ? 48 : 0),
     }))
     .sort((a, b) => b.score - a.score);
 
   const diversified = diversifyByChannel(scored).slice(0, 40);
   state.feedReasonsById = Object.fromEntries(
-    diversified.map(({ video, source }) => [video.id, feedReasonForSource(video, source)]),
+    diversified.map(({ video, source }) => [
+      video.id,
+      watchedIds.has(video.id) ? "Watch again" : feedReasonForSource(video, source),
+    ]),
   );
   return diversified.map(({ video }) => video);
 }
@@ -1749,16 +1994,19 @@ function interestMatchScore(video, interestTerms) {
     return 0;
   }
 
-  const haystack = [
+  const haystackTokens = new Set([
     video.title,
     video.channelTitle,
     video.description,
     ...(video.tags || []),
-  ].join(" ").toLowerCase();
+  ].join(" ").toLowerCase()
+    .replace(/[^\w\s'-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean));
 
   let matches = 0;
   interestTerms.forEach((term) => {
-    if (haystack.includes(term)) {
+    if (haystackTokens.has(term)) {
       matches += 1;
     }
   });
@@ -2962,6 +3210,10 @@ async function shareVideo(video) {
 function setView(view, options = {}) {
   view = sanitizeView(view);
   const changed = state.view !== view;
+  if (changed && !["home", "subscriptions"].includes(view)) {
+    cancelSubscriptionRequest();
+    cancelHomeFeedRequest();
+  }
   if (changed && state.view === "search") {
     state.searchLoadVersion += 1;
     cancelSearchRequest();
@@ -3410,9 +3662,32 @@ function renderHome() {
         ${filterChip("saved", "Saved")}
         ${filterChip("history", "History")}
       </div>
+      ${renderHomeStatus()}
       ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, feedSource, emptyMessage)}
     </section>
   `;
+}
+
+function renderHomeStatus() {
+  if (state.homeFilter !== "all") {
+    return "";
+  }
+  if (state.homeFeedStatus === "refreshing") {
+    return `<div class="inline-state home-status" role="status"><strong>Refreshing Home</strong><span>Your current feed stays available.</span></div>`;
+  }
+  if (state.homeFeedStatus === "offline") {
+    return `<div class="inline-state home-status"><strong>Offline</strong><span>${escapeHtml(state.homeFeedError || "Showing videos already on this phone.")}</span></div>`;
+  }
+  if (state.homeFeedStatus === "error") {
+    return `
+      <div class="inline-state error home-status" role="alert">
+        <strong>Home could not refresh.</strong>
+        <span>${escapeHtml(state.homeFeedError || "Try again in a moment.")}</span>
+        <button class="text-button" type="button" data-action="refresh-home">Try again</button>
+      </div>
+    `;
+  }
+  return "";
 }
 
 function renderFeedLoader() {
@@ -4448,6 +4723,9 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "liked") {
     await loadLikedVideos({ refresh: true });
+  }
+  if (action === "refresh-home") {
+    await loadPopularHome({ refresh: true });
   }
   if (action === "refresh-subs") {
     target.disabled = true;

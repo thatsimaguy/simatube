@@ -1938,6 +1938,11 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   margin: 4px 0 -4px -10px;
 }
 
+.home-status {
+  margin-top: 8px;
+  margin-bottom: 12px;
+}
+
 .comments-block .inline-state {
   margin: 12px 0 0;
 }
@@ -2255,6 +2260,35 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   .bottom-nav {
     bottom: 18px;
     border-radius: 0 0 34px 34px;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .video-row.motion-entry,
+  .saved-badge,
+  .watch-progress {
+    animation: none;
+  }
+
+  .thumb-button img {
+    transform: none;
+    transition: opacity var(--motion-fast);
+  }
+
+  .video-row:hover .thumb-button img,
+  .video-row:focus-within .thumb-button img {
+    transform: none;
+    filter: none;
+  }
+
+  .video-row:hover .thumb-button::before,
+  .video-row:focus-within .thumb-button::before {
+    animation: none;
+  }
+
+  .saved-badge {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }
 
