@@ -17,13 +17,14 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const CACHE_CLEANUP_VERSION = "2026-07-fyp-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-fyp-v2";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
-const PERSONAL_CACHE_VERSION = 1;
+const PERSONAL_CACHE_VERSION = 2;
 const PERSONAL_CACHE_FRESH_MS = 30 * 60 * 1000;
 const PERSONAL_CACHE_MAX_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INITIAL_VIDEO_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
 const VIDEO_ROWS_INCREMENT = IS_MEMORY_CONSTRAINED_MOBILE ? 6 : 8;
+const MAX_HOME_FEED_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 48 : 72;
 const MAX_VIDEO_CACHE_ENTRIES = 240;
 const MAX_CHANNEL_CACHE_ENTRIES = 120;
 const MAX_CHANNEL_VIDEO_CACHES = 12;
@@ -114,6 +115,7 @@ let googleIdentityLoadPromise = null;
 let serverSessionRefreshPromise = null;
 let pendingRenderFocus = null;
 let bootStableTimer = 0;
+let infiniteScrollRaf = 0;
 let portraitLockTimer = 0;
 let portraitLockPromise = null;
 let lastPortraitLockAttempt = 0;
@@ -292,6 +294,7 @@ function boot() {
   clearAuthResultFromUrl();
   render();
   window.requestAnimationFrame(resetScroll);
+  setupInfiniteVideoScroll();
   setupPortraitOrientationLock();
   setupNetworkStatus();
   scheduleBootStabilityCheck();
@@ -941,6 +944,7 @@ function failPlayerApiLoad(script) {
   const poster = document.querySelector(".poster-button");
   poster?.classList.remove("is-loading");
   poster?.removeAttribute("aria-busy");
+  poster?.removeAttribute("hidden");
   showToast("The player could not load. Tap to try again.");
 }
 
@@ -1853,7 +1857,7 @@ async function loadPopularVideos(options = {}) {
     part: "snippet,contentDetails,statistics",
     chart: "mostPopular",
     regionCode: state.config.regionCode,
-    maxResults: IS_MEMORY_CONSTRAINED_MOBILE ? 15 : 25,
+    maxResults: IS_MEMORY_CONSTRAINED_MOBILE ? 25 : 40,
   }, options);
   const videos = (payload.items || []).map(normalizeVideoResource);
   return hydrateVideoChannelThumbnails(videos, options);
@@ -1889,10 +1893,12 @@ async function loadInterestDiscoveryVideos(options = {}) {
 }
 
 function recommendationQueries() {
+  const watchedHasShape = state.localHistory.length >= 3
+    && new Set(state.localHistory.map((video) => video.channelId).filter(Boolean)).size >= 2;
   const sources = [
-    ...state.searchHistory,
-    ...state.localHistory.slice(0, 8).map(videoSearchSeed),
-    ...state.likedVideos.slice(0, 8).map(videoSearchSeed),
+    ...state.searchHistory.slice(0, 4),
+    ...state.likedVideos.slice(0, 8).map(videoTopicSeed),
+    ...(watchedHasShape ? state.localHistory.slice(0, 3).map(videoTopicSeed) : []),
   ];
 
   return [...new Set(sources
@@ -1901,18 +1907,21 @@ function recommendationQueries() {
     .slice(0, MAX_DISCOVERY_QUERIES);
 }
 
-function videoSearchSeed(video) {
-  return `${video.channelTitle || ""} ${video.title || ""}`;
+function videoTopicSeed(video) {
+  const tagText = Array.isArray(video?.tags) ? video.tags.slice(0, 3).join(" ") : "";
+  return `${tagText} ${video?.title || ""}`;
 }
 
 function cleanRecommendationQuery(value = "") {
   const cleaned = String(value)
+    .replace(/\[[^\]]*]|\([^)]*\)/g, " ")
+    .replace(/\b(part|episode|ep)\s*\d+\b/gi, " ")
     .replace(/[^\w\s'-]/g, " ")
-    .replace(/\b(official|video|clips?|shorts?|episode|full|new|latest|hd|4k)\b/gi, " ")
+    .replace(/\b(official|video|clips?|shorts?|episode|full|new|latest|trailer|highlights?|reaction|compilation|livestream|stream|hd|4k)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  return cleaned.split(" ").slice(0, 5).join(" ");
+  return cleaned.split(" ").slice(0, 4).join(" ");
 }
 
 function rankHomeCandidates(candidates) {
@@ -1929,7 +1938,7 @@ function rankHomeCandidates(candidates) {
     }))
     .sort((a, b) => b.score - a.score);
 
-  const diversified = balanceHomeCandidates(scored).slice(0, 40);
+  const diversified = balanceHomeCandidates(scored).slice(0, MAX_HOME_FEED_ROWS);
   state.feedReasonsById = {};
   return diversified.map(({ video }) => video);
 }
@@ -1955,9 +1964,9 @@ function dedupeCandidates(candidates) {
 
 function homeScore(video, source, interestTerms) {
   const sourceScore = {
-    interest: 78,
-    subscription: 66,
-    popular: 36,
+    interest: 54,
+    subscription: 68,
+    popular: 50,
   }[source] || 20;
 
   const ageDays = ageInDays(video.publishedAt);
@@ -1965,23 +1974,25 @@ function homeScore(video, source, interestTerms) {
   const views = Math.log10(Math.max(1, video.viewCountNumber || 0)) * 7;
   const likes = Math.log10(Math.max(1, video.likeCountNumber || 0)) * 5;
   const interest = interestMatchScore(video, interestTerms);
-  const subscribed = state.subscriptionIdsByChannel[video.channelId] ? 12 : 0;
+  const subscribed = state.subscriptionIdsByChannel[video.channelId] ? 8 : 0;
 
   return sourceScore + recency + views + likes + interest + subscribed + stableDailyJitter(video.id);
 }
 
 function interestTokenSet() {
+  const watchedHasShape = state.localHistory.length >= 3
+    && new Set(state.localHistory.map((video) => video.channelId).filter(Boolean)).size >= 2;
   const text = [
-    ...state.searchHistory,
-    ...state.localHistory.slice(0, 10).map(videoSearchSeed),
-    ...state.likedVideos.slice(0, 10).map(videoSearchSeed),
+    ...state.searchHistory.slice(0, 8),
+    ...state.likedVideos.slice(0, 10).map(videoTopicSeed),
+    ...(watchedHasShape ? state.localHistory.slice(0, 5).map(videoTopicSeed) : []),
   ].join(" ").toLowerCase();
 
   return new Set(text
     .replace(/[^\w\s'-]/g, " ")
     .split(/\s+/)
     .filter((token) => token.length > 3)
-    .filter((token) => !["official", "video", "clips", "shorts", "full", "latest"].includes(token)));
+    .filter((token) => !["official", "video", "clips", "shorts", "full", "latest", "trailer", "reaction", "episode"].includes(token)));
 }
 
 function interestMatchScore(video, interestTerms) {
@@ -2006,7 +2017,7 @@ function interestMatchScore(video, interestTerms) {
     }
   });
 
-  return Math.min(matches * 6, 36);
+  return Math.min(matches * 4, 18);
 }
 
 function feedReasonForSource(video, source) {
@@ -2054,8 +2065,8 @@ function balanceHomeCandidates(items) {
   });
 
   const sourcePattern = buckets.subscription.length
-    ? ["subscription", "interest", "popular", "interest", "subscription", "popular"]
-    : ["interest", "popular", "interest", "popular"];
+    ? ["subscription", "popular", "interest", "popular", "subscription", "popular", "interest"]
+    : ["popular", "interest", "popular", "interest"];
   const picked = [];
   const pickedIds = new Set();
   const channelCounts = new Map();
@@ -2078,13 +2089,13 @@ function balanceHomeCandidates(items) {
   }
 
   let cursor = 0;
-  while (picked.length < 40 && picked.length < items.length) {
+  while (picked.length < MAX_HOME_FEED_ROWS && picked.length < items.length) {
     const preferred = sourcePattern[cursor % sourcePattern.length];
     cursor += 1;
     const next = takeFrom(preferred)
-      || takeFrom("interest")
-      || takeFrom("subscription")
       || takeFrom("popular")
+      || takeFrom("subscription")
+      || takeFrom("interest")
       || takeFrom("other")
       || items.find((item) => !pickedIds.has(item.video?.id));
     if (!next) {
@@ -3321,6 +3332,67 @@ function resetScroll() {
   window.scrollTo(0, 0);
   document.documentElement.scrollTop = 0;
   document.body.scrollTop = 0;
+  scheduleInfiniteVideoScroll();
+}
+
+function setupInfiniteVideoScroll() {
+  window.addEventListener("scroll", scheduleInfiniteVideoScroll, { passive: true });
+  window.addEventListener("resize", scheduleInfiniteVideoScroll, { passive: true });
+}
+
+function scheduleInfiniteVideoScroll() {
+  if (infiniteScrollRaf) {
+    return;
+  }
+  infiniteScrollRaf = window.requestAnimationFrame(() => {
+    infiniteScrollRaf = 0;
+    growVisibleRowsNearBottom();
+  });
+}
+
+function activeVideoListSource() {
+  if (state.view === "home") {
+    return ["history", "saved"].includes(state.homeFilter) ? state.homeFilter : "home";
+  }
+  if (state.view === "search") {
+    return "search";
+  }
+  if (state.view === "subscriptions") {
+    return "subscriptions";
+  }
+  if (state.view === "channel") {
+    return "channel";
+  }
+  return "";
+}
+
+function videoListForSource(source) {
+  if (source === "home") {
+    return filteredHomeFeed();
+  }
+  return queueForSource(source);
+}
+
+function growVisibleRowsNearBottom() {
+  const source = activeVideoListSource();
+  if (!source) {
+    return;
+  }
+  const list = videoListForSource(source);
+  const visibleLimit = state.visibleRowsBySource[source] || initialRowsForSource(source);
+  if (!Array.isArray(list) || list.length <= visibleLimit) {
+    return;
+  }
+
+  const scrollElement = document.scrollingElement || document.documentElement;
+  const remaining = scrollElement.scrollHeight - (window.scrollY + window.innerHeight);
+  const threshold = Math.max(520, window.innerHeight * 0.7);
+  if (remaining > threshold) {
+    return;
+  }
+
+  state.visibleRowsBySource[source] = Math.min(list.length, visibleLimit + VIDEO_ROWS_INCREMENT);
+  render();
 }
 
 function filteredHomeFeed() {
@@ -3507,6 +3579,7 @@ function render() {
     descriptionToggle.checked = descriptionExpanded;
   }
   restoreRenderFocus();
+  scheduleInfiniteVideoScroll();
 }
 
 function focusSignature(element) {
@@ -3886,12 +3959,13 @@ function renderWatch() {
     loading: "Loading",
   }[commentsStatus] || "Load";
   const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
+  const autoplayPending = state.pendingAutoplayVideoId === video.id;
 
   return `
     <section class="watch-view">
       <div class="player-shell" data-video-id="${escapeHtml(video.id)}">
         <div id="playerMount"></div>
-        <button class="poster-button" type="button" data-action="play" aria-label="Play video">
+        <button class="poster-button${autoplayPending ? " is-loading" : ""}" type="button" data-action="play" aria-label="Play video"${autoplayPending ? ' hidden aria-busy="true"' : ""}>
           ${video.posterUrl || video.thumbnailUrl
             ? `<img src="${escapeHtml(video.posterUrl || video.thumbnailUrl)}" alt="" decoding="async" fetchpriority="high" data-image-fallback="thumbnail" data-fallback-initial="${escapeHtml(channelInitial(video.title))}" />`
             : `<span class="thumbnail-fallback" aria-hidden="true">${escapeHtml(channelInitial(video.title))}</span>`}
@@ -4443,6 +4517,7 @@ function mountPlayer(autoplay) {
         fs: 0,
         iv_load_policy: 3,
         modestbranding: 1,
+        mute: autoplay ? 1 : 0,
         playsinline: 1,
         rel: 0,
       },
@@ -4453,16 +4528,20 @@ function mountPlayer(autoplay) {
           }
           state.playerReady = true;
           configurePlayerIframe();
-          player.unloadModule?.("captions");
-          player.unloadModule?.("cc");
-          if (state.pendingAutoplayVideoId === video.id) {
+          forceCaptionsOff(player);
+          if (autoplay || state.pendingAutoplayVideoId === video.id) {
             state.pendingAutoplayVideoId = "";
-            document.querySelector(".poster-button")?.setAttribute("hidden", "");
-            player.playVideo?.();
+            startAutoplayPlayback(player, video.id);
           }
         },
         onError: (event) => handlePlayerError(event.data, video.id),
         onStateChange: (event) => {
+          forceCaptionsOff(player);
+          if (event.data === window.YT?.PlayerState?.CUED
+            && state.view === "watch"
+            && state.activeVideoId === video.id) {
+            retryAutoplayPlayback(player, video.id);
+          }
           if (state.player === player
             && state.playerVideoId === video.id
             && event.data === window.YT.PlayerState.ENDED) {
@@ -4477,10 +4556,67 @@ function mountPlayer(autoplay) {
     const poster = document.querySelector(".poster-button");
     poster?.classList.remove("is-loading");
     poster?.removeAttribute("aria-busy");
+    poster?.removeAttribute("hidden");
     showToast("The player could not start. Tap to try again.");
     return;
   }
   state.player = player;
+}
+
+function forceCaptionsOff(player = state.player) {
+  if (!player) {
+    return;
+  }
+  try {
+    player.setOption?.("captions", "track", {});
+  } catch {}
+  try {
+    player.setOption?.("cc", "track", {});
+  } catch {}
+  try {
+    player.unloadModule?.("captions");
+  } catch {}
+  try {
+    player.unloadModule?.("cc");
+  } catch {}
+}
+
+function startAutoplayPlayback(player, videoId) {
+  if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
+    return;
+  }
+  const poster = document.querySelector(".poster-button");
+  poster?.setAttribute("hidden", "");
+  poster?.classList.remove("is-loading");
+  poster?.removeAttribute("aria-busy");
+  forceCaptionsOff(player);
+  try {
+    player.mute?.();
+  } catch {}
+  try {
+    player.playVideo?.();
+  } catch {}
+  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 350);
+  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 1200);
+}
+
+function retryAutoplayPlayback(player, videoId) {
+  if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
+    return;
+  }
+  forceCaptionsOff(player);
+  let playerState = -1;
+  try {
+    playerState = player.getPlayerState?.() ?? -1;
+  } catch {}
+  if (playerState !== window.YT?.PlayerState?.PLAYING) {
+    try {
+      player.mute?.();
+    } catch {}
+    try {
+      player.playVideo?.();
+    } catch {}
+  }
 }
 
 function destroyPlayer() {
@@ -4611,7 +4747,9 @@ function playActive() {
   state.pendingAutoplayVideoId = "";
   poster?.setAttribute("hidden", "");
   if (state.player?.loadVideoById) {
-    state.player.loadVideoById(video.id);
+    forceCaptionsOff(state.player);
+    state.player.loadVideoById({ videoId: video.id });
+    startAutoplayPlayback(state.player, video.id);
     return;
   }
 
