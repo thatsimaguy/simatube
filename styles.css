@@ -792,13 +792,11 @@ label:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  border: 1px solid rgba(255, 0, 51, .24);
-  background:
-    radial-gradient(circle at 50% 40%, rgba(255, 0, 51, .18), rgba(255, 0, 51, .06) 46%, rgba(255, 255, 255, .055) 47%),
-    #141414;
+  border: 1px solid rgba(255, 255, 255, .13);
+  background: #171717;
   color: #fff;
   cursor: pointer;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .035);
   transition: transform var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast), box-shadow var(--motion-fast);
 }
 
@@ -810,8 +808,9 @@ label:focus-visible {
 
 .home-refresh-button:hover,
 .home-refresh-button:focus-visible {
-  border-color: rgba(255, 0, 51, .48);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06), 0 0 18px rgba(255, 0, 51, .16);
+  border-color: rgba(255, 255, 255, .28);
+  background: #202020;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06);
 }
 
 .home-refresh-button:active {
@@ -821,7 +820,7 @@ label:focus-visible {
 .home-refresh-button[disabled],
 .home-refresh-button[aria-busy="true"] {
   color: #fff;
-  opacity: .78;
+  opacity: .86;
 }
 
 .home-refresh-button[aria-busy="true"] svg {

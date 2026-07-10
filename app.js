@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-comments-wrap-no-folders-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-fast-home-refresh-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -1299,13 +1299,16 @@ async function loadPopularHome(options = {}) {
     return;
   }
 
-  if (options.refresh) {
+  if (options.refresh && !options.skipPrepare) {
     prepareHomeRefresh();
   }
-  state.feedLoading = !state.homeFeed.length;
+  const showBlockingLoader = !state.homeFeed.length;
+  state.feedLoading = showBlockingLoader;
   state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
   state.homeFeedError = "";
-  setLoading("Loading Home");
+  if (showBlockingLoader) {
+    setLoading("Loading Home");
+  }
   try {
     const popularVideos = await loadPopularVideos();
     const rankedPopular = rankHomeCandidates(popularVideos.map((video) => ({ video, source: "popular" })));
@@ -1813,6 +1816,7 @@ function cancelHomeFeedRequest() {
   state.homeFeedLoadVersion += 1;
   state.homeFeedAbortController?.abort();
   state.homeFeedAbortController = null;
+  state.homeFeedLoadPromise = null;
   state.homeFeedLoadScheduled = false;
 }
 
@@ -1820,6 +1824,25 @@ function prepareHomeRefresh() {
   state.homeSessionSeed = createHomeSessionSeed();
   state.homeDiscoveryPageTokens = {};
   state.visibleRowsBySource.home = initialRowsForSource("home");
+}
+
+function refreshHomeFromCache() {
+  const cachedVideos = Object.values(state.videoCacheById);
+  const candidates = [
+    ...state.subscriptionVideos.map((video) => ({ video, source: "subscription" })),
+    ...state.likedVideos.map((video) => ({ video, source: "interest" })),
+    ...state.homeFeed.map((video) => ({ video, source: state.subscriptionIdsByChannel[video.channelId] ? "subscription" : "popular" })),
+    ...state.localHistory.map((video) => ({ video, source: "interest" })),
+    ...cachedVideos.map((video) => ({ video, source: state.subscriptionIdsByChannel[video.channelId] ? "subscription" : "popular" })),
+  ];
+  const refreshed = rankHomeCandidates(candidates);
+  if (!refreshed.length) {
+    return false;
+  }
+  state.homeFeed = refreshed;
+  state.queue = state.homeFeed;
+  state.usingCachedPersonalFeed = true;
+  return true;
 }
 
 function scheduleHomeFeedEnrichment(options = {}) {
@@ -1855,7 +1878,7 @@ function loadPersonalHomeFeed(options = {}) {
     return state.homeFeedLoadPromise;
   }
 
-  if (options.refresh && !options.append) {
+  if (options.refresh && !options.append && !options.skipPrepare) {
     prepareHomeRefresh();
   }
 
@@ -2713,25 +2736,36 @@ function pruneCommentsCache() {
 }
 
 async function refreshHomeFeed() {
-  if (state.auth.accessToken) {
-    prepareHomeRefresh();
-    state.homeFeedLoaded = false;
-    state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
-    state.homeFeedError = "";
+  cancelHomeFeedRequest();
+  prepareHomeRefresh();
+  const usedCache = refreshHomeFromCache();
+  state.homeFeedLoaded = false;
+  state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
+  state.homeFeedError = "";
+  if (usedCache || state.homeFeed.length) {
     render();
-    await loadSubscriptionsAndFeed({
-      refresh: true,
-      includeHome: false,
-      quiet: true,
-      background: Boolean(state.homeFeed.length),
-    });
-    await loadPersonalHomeFeed({ refresh: true });
+  }
+
+  if (state.auth.accessToken) {
+    loadPersonalHomeFeed({ refresh: true, skipPrepare: true });
+    window.setTimeout(() => {
+      loadSubscriptionsAndFeed({
+        refresh: true,
+        includeHome: false,
+        quiet: true,
+        background: true,
+      }).catch(() => false);
+    }, 100);
     return;
   }
 
   if (hasApiAccess()) {
-    await loadPopularHome({ refresh: true });
+    loadPopularHome({ refresh: true, skipPrepare: true });
+    return;
   }
+
+  state.homeFeedStatus = state.homeFeed.length ? "ready" : "idle";
+  render();
 }
 
 async function loadComments(videoId) {
@@ -4206,6 +4240,7 @@ function renderHome() {
     today: "No new long-form videos today.",
     saved: "Save a video to keep it here.",
   }[state.homeFilter] || "No videos are ready yet.";
+  const refreshPending = state.homeFeedStatus === "refreshing" || Boolean(state.homeFeedLoadPromise);
   return `
     <section class="home-rail">
       <h1 class="sr-only">Home</h1>
@@ -4215,7 +4250,7 @@ function renderHome() {
         ${filterChip("all", personalized ? "For you" : "Popular")}
         ${filterChip("today", "New")}
         ${filterChip("saved", "Saved")}
-        <button class="home-refresh-button" type="button" data-action="refresh-home" aria-label="Refresh For you" title="Refresh For you"${pendingButtonAttributes(state.homeFeedStatus === "refreshing" || state.homeFeedLoadPromise)}>
+        <button class="home-refresh-button" type="button" data-action="refresh-home" aria-label="Refresh For you" title="Refresh For you"${refreshPending ? ` aria-busy="true"` : ""}>
           ${icon("refreshHome")}
         </button>
       </div>
@@ -4990,7 +5025,7 @@ function icon(name) {
     podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
     radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
     refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
-    refreshHome: '<path d="M3.2 12.2A8.8 8.8 0 0 1 18 5.8" stroke-width="3.15"/><path d="M17.45 2.9h3.35c.55 0 .85.66.46 1.05L19.6 5.6l1.6 1.6c.39.39.11 1.05-.44 1.05h-5.1c-.38 0-.68-.3-.68-.68v-5.1c0-.55.66-.83 1.05-.44l1.42 1.43Z" fill="currentColor" stroke="none"/><path d="M20.8 11.8A8.8 8.8 0 0 1 6 18.2" stroke-width="3.15"/><path d="M6.55 21.1H3.2c-.55 0-.85-.66-.46-1.05L4.4 18.4l-1.6-1.6c-.39-.39-.11-1.05.44-1.05h5.1c.38 0 .68.3.68.68v5.1c0 .55-.66.83-1.05.44l-1.42-1.43Z" fill="currentColor" stroke="none"/>',
+    refreshHome: '<path d="M3.5 12a8.5 8.5 0 0 1 14.4-6.1" stroke-width="3.25"/><path d="M18 3.2h3.2v3.2" stroke-width="3.25"/><path d="M20.5 12a8.5 8.5 0 0 1-14.4 6.1" stroke-width="3.25"/><path d="M6 20.8H2.8v-3.2" stroke-width="3.25"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
