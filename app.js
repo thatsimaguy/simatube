@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-home-launch-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-search-filters-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -212,6 +212,7 @@ const state = {
   searchStatus: "idle",
   searchCacheByQuery: Object.create(null),
   searchAbortController: null,
+  searchSort: "relevance",
   commentsLoadVersion: 0,
   authVersion: 0,
   homeFilter: "all",
@@ -4167,6 +4168,43 @@ function filterChip(value, label) {
   return `<button class="chip${active}" type="button" data-action="home-filter" data-filter="${escapeHtml(value)}" aria-pressed="${state.homeFilter === value ? "true" : "false"}">${escapeHtml(label)}</button>`;
 }
 
+function sanitizeSearchSort(sort) {
+  return ["relevance", "recent", "views", "likes"].includes(sort) ? sort : "relevance";
+}
+
+function sortedSearchResults() {
+  const videos = [...state.searchResults];
+  if (state.searchSort === "recent") {
+    return videos.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+  }
+  if (state.searchSort === "views") {
+    return videos.sort((a, b) => (b.viewCountNumber || 0) - (a.viewCountNumber || 0));
+  }
+  if (state.searchSort === "likes") {
+    return videos.sort((a, b) => (b.likeCountNumber || 0) - (a.likeCountNumber || 0));
+  }
+  return videos;
+}
+
+function searchSortChip(value, label) {
+  const active = state.searchSort === value ? " active" : "";
+  return `<button class="chip${active}" type="button" data-action="search-sort" data-sort="${escapeHtml(value)}" aria-pressed="${state.searchSort === value ? "true" : "false"}">${escapeHtml(label)}</button>`;
+}
+
+function renderSearchSortControls() {
+  if (!state.query) {
+    return "";
+  }
+  return `
+    <div class="search-sort-row" aria-label="Search filters">
+      ${searchSortChip("relevance", "Relevant")}
+      ${searchSortChip("recent", "Most recent")}
+      ${searchSortChip("views", "Most viewed")}
+      ${searchSortChip("likes", "Most liked")}
+    </div>
+  `;
+}
+
 function renderSearch() {
   const loading = state.searchStatus === "loading";
   let content = renderQuickSearches();
@@ -4199,10 +4237,11 @@ function renderSearch() {
       </section>
     `;
   } else if (state.query) {
+    const results = sortedSearchResults();
     const resultLabel = state.searchResults.length === 1 ? "result" : "results";
     content = `
       <p class="result-label">${state.searchResults.length} ${resultLabel} for ${escapeHtml(state.query)}</p>
-      ${renderVideoList(state.searchResults, "search")}
+      ${renderVideoList(results, "search")}
     `;
   }
 
@@ -4216,6 +4255,7 @@ function renderSearch() {
         </label>
         <button class="text-button" type="submit" data-action="search-submit"${pendingButtonAttributes(loading)}>Search</button>
       </form>
+      ${renderSearchSortControls()}
       ${content}
     </section>
   `;
@@ -5439,7 +5479,7 @@ function nextVideo(options = {}) {
 
 function queueForSource(source) {
   if (source === "search") {
-    return state.searchResults;
+    return sortedSearchResults();
   }
   if (source === "history") {
     return state.localHistory;
@@ -5641,6 +5681,10 @@ app.addEventListener("click", async (event) => {
   if (action === "home-filter") {
     const filter = target.dataset.filter || "all";
     state.homeFilter = ["all", "today", "saved"].includes(filter) ? filter : "all";
+    render();
+  }
+  if (action === "search-sort") {
+    state.searchSort = sanitizeSearchSort(target.dataset.sort);
     render();
   }
   if (action === "watch") {

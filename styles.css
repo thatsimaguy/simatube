@@ -1143,6 +1143,19 @@ label:focus-visible {
   font-size: 16px;
 }
 
+.search-sort-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 12px 10px;
+  background: rgba(5, 5, 5, .97);
+  scrollbar-width: none;
+}
+
+.search-sort-row::-webkit-scrollbar {
+  display: none;
+}
+
 .result-label {
   margin: 6px 12px 12px;
 }
