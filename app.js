@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-music-mode-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-fullscreen-music-mode-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -3888,7 +3888,18 @@ function shouldShowReconnect() {
 
 function render() {
   captureRenderFocus();
-  if (shouldShowInstallIntro()) {
+  const showInstallIntro = shouldShowInstallIntro();
+  const showReconnect = shouldShowReconnect();
+  const showOnboarding = shouldShowOnboarding();
+  const musicModeOpen = state.view === "watch"
+    && state.musicMode
+    && !showInstallIntro
+    && !showReconnect
+    && !showOnboarding;
+  document.documentElement.classList.toggle("music-mode-open", musicModeOpen);
+  document.body.classList.toggle("music-mode-open", musicModeOpen);
+
+  if (showInstallIntro) {
     closePlayerFullscreen();
     destroyPlayer();
     app.innerHTML = renderInstallIntro();
@@ -3896,7 +3907,7 @@ function render() {
     return;
   }
 
-  if (shouldShowReconnect()) {
+  if (showReconnect) {
     closePlayerFullscreen();
     destroyPlayer();
     app.innerHTML = renderReconnectScreen();
@@ -3904,7 +3915,7 @@ function render() {
     return;
   }
 
-  if (shouldShowOnboarding()) {
+  if (showOnboarding) {
     closePlayerFullscreen();
     destroyPlayer();
     app.innerHTML = renderOnboarding();
@@ -3921,10 +3932,10 @@ function render() {
   }
 
   app.innerHTML = `
-    ${renderTopbar()}
-    ${state.loading ? `<div class="loading-bar" role="status" aria-label="${escapeHtml(state.loading)}"><span aria-hidden="true"></span></div>` : ""}
+    ${musicModeOpen ? "" : renderTopbar()}
+    ${state.loading && !musicModeOpen ? `<div class="loading-bar" role="status" aria-label="${escapeHtml(state.loading)}"><span aria-hidden="true"></span></div>` : ""}
     <section class="screen screen-${escapeHtml(state.view)}">${renderView()}</section>
-    ${renderBottomNav()}
+    ${musicModeOpen ? "" : renderBottomNav()}
   `;
 
   if (retainedPlayer) {
@@ -4117,13 +4128,19 @@ function refreshWatchAfterInlinePlayerSwitch() {
     return false;
   }
 
+  currentWatch.className = nextWatch.className;
   currentShell.dataset.videoId = state.activeVideoId;
+  const nextShell = nextWatch.querySelector(".player-shell");
+  const wasFullscreen = currentShell.classList.contains("app-fullscreen");
+  currentShell.className = nextShell?.className || currentShell.className;
+  currentShell.classList.toggle("app-fullscreen", wasFullscreen);
   syncInlinePlayerChild(currentShell, nextWatch, ".poster-button", (poster) => {
     poster.setAttribute("hidden", "");
     poster.classList.add("is-loading");
     poster.setAttribute("aria-busy", "true");
   });
   syncInlinePlayerChild(currentShell, nextWatch, ".player-fallback");
+  syncInlinePlayerChild(currentShell, nextWatch, ".music-mode-visual");
   currentDetail.replaceWith(nextDetail);
   setFullscreenButtonState(currentShell.classList.contains("app-fullscreen"));
   scheduleInfiniteVideoScroll();
@@ -4490,7 +4507,7 @@ function renderWatch() {
   const autoplayPending = state.pendingAutoplayVideoId === video.id || autoplayRecoveryActive(video.id);
 
   return `
-    <section class="watch-view">
+    <section class="watch-view${state.musicMode ? " music-watch" : ""}">
       <div class="player-shell${state.musicMode ? " music-mode-on" : ""}" data-video-id="${escapeHtml(video.id)}">
         <div id="playerMount"></div>
         <button class="poster-button${autoplayPending ? " is-loading" : ""}" type="button" data-action="play" aria-label="Play video"${autoplayPending ? ' hidden aria-busy="true"' : ""}>
@@ -4560,8 +4577,11 @@ function renderMusicModeVisual(video) {
     ? `<img src="${escapeHtml(artUrl)}" alt="" decoding="async" data-image-fallback="thumbnail" data-fallback-initial="${escapeHtml(channelInitial(video.title))}" />`
     : `<span>${escapeHtml(channelInitial(video.title))}</span>`;
   return `
-    <div class="music-mode-visual" aria-hidden="true">
+    <div class="music-mode-visual">
       ${artUrl ? `<img class="music-mode-backdrop" src="${escapeHtml(artUrl)}" alt="" decoding="async" />` : ""}
+      <button class="music-mode-exit-button" type="button" data-action="music-mode" aria-label="Exit Music Mode">
+        ${icon("music")}<span>Music</span>
+      </button>
       <div class="vinyl-stage">
         <div class="vinyl-disc">
           <span class="vinyl-label">${art}</span>

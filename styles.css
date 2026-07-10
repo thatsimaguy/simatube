@@ -136,6 +136,25 @@ label:focus-visible {
   padding-bottom: calc(76px + var(--safe-bottom));
 }
 
+html.music-mode-open,
+body.music-mode-open {
+  background: #000;
+  overflow: hidden;
+}
+
+html.music-mode-open .app-shell {
+  width: min(100%, 430px);
+  min-height: 100svh;
+  padding-bottom: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+html.music-mode-open .screen-watch {
+  min-height: 100svh;
+  animation: none;
+}
+
 .topbar {
   position: sticky;
   top: 0;
@@ -1374,6 +1393,25 @@ label:focus-visible {
     #030303;
 }
 
+.watch-view.music-watch {
+  min-height: 100svh;
+  background: #000;
+  overflow: hidden;
+}
+
+.watch-view.music-watch .player-shell.music-mode-on {
+  width: 100%;
+  height: 100svh;
+  min-height: 100svh;
+  aspect-ratio: auto;
+  background: #000;
+}
+
+.watch-view.music-watch .watch-detail,
+.watch-view.music-watch .queue-section {
+  display: none;
+}
+
 .player-shell.app-fullscreen {
   position: fixed;
   inset: 0;
@@ -1484,15 +1522,14 @@ html.player-fullscreen-open .screen-watch {
   z-index: 5;
   isolation: isolate;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, .8fr);
+  grid-template-rows: 1fr auto;
   align-items: center;
-  gap: 14px;
-  padding: 18px 18px 18px 22px;
+  justify-items: center;
+  gap: 18px;
+  padding: calc(72px + env(safe-area-inset-top, 0px)) 22px calc(36px + env(safe-area-inset-bottom, 0px));
   overflow: hidden;
-  pointer-events: none;
-  background:
-    linear-gradient(90deg, rgba(0, 0, 0, .92), rgba(0, 0, 0, .68) 52%, rgba(0, 0, 0, .42)),
-    radial-gradient(circle at 33% 50%, rgba(255, 255, 255, .12), rgba(255, 255, 255, 0) 42%);
+  pointer-events: auto;
+  background: #000;
   animation: music-mode-rise var(--motion-med) both;
 }
 
@@ -1503,8 +1540,8 @@ html.player-fullscreen-open .screen-watch {
   width: calc(100% + 56px);
   height: calc(100% + 56px);
   object-fit: cover;
-  opacity: .28;
-  filter: blur(22px) saturate(1.25) brightness(.74);
+  opacity: .18;
+  filter: blur(28px) saturate(1.12) brightness(.52);
   transform: scale(1.05);
 }
 
@@ -1514,16 +1551,51 @@ html.player-fullscreen-open .screen-watch {
   inset: 0;
   z-index: -1;
   background:
-    radial-gradient(circle at 28% 48%, rgba(255, 255, 255, .16), rgba(255, 255, 255, 0) 24%),
-    linear-gradient(135deg, rgba(255, 255, 255, .08), rgba(255, 255, 255, 0) 38%);
+    radial-gradient(circle at 50% 42%, rgba(255, 255, 255, .11), rgba(255, 255, 255, 0) 30%),
+    linear-gradient(180deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, 0) 28%);
+}
+
+.music-mode-exit-button {
+  position: absolute;
+  top: calc(16px + env(safe-area-inset-top, 0px));
+  right: calc(14px + env(safe-area-inset-right, 0px));
+  z-index: 3;
+  min-width: 92px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  background: rgba(18, 18, 18, .88);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 820;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .42), inset 0 1px 0 rgba(255, 255, 255, .09);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.music-mode-exit-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.music-mode-exit-button:active {
+  transform: scale(.96);
 }
 
 .vinyl-stage {
   position: relative;
-  width: min(48vw, 188px);
+  width: min(78vw, 330px);
   max-width: 100%;
   aspect-ratio: 1;
   justify-self: center;
+  align-self: center;
   display: grid;
   place-items: center;
 }
@@ -1614,9 +1686,11 @@ html.player-fullscreen-open .screen-watch {
 
 .music-mode-caption {
   min-width: 0;
-  align-self: end;
-  padding-bottom: 4px;
+  width: min(100%, 340px);
+  align-self: start;
+  padding-bottom: 0;
   color: #fff;
+  text-align: center;
   text-shadow: 0 2px 12px rgba(0, 0, 0, .65);
 }
 
