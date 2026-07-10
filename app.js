@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-watch-player-v4";
+const CACHE_CLEANUP_VERSION = "2026-07-watch-player-v5";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -3228,16 +3228,20 @@ function openWatch(videoId, queue = [], options = {}) {
   state.view = "watch";
   writeJson("yt_active_video_id", videoId);
   writeJson("yt_last_view", "watch");
-  if (canTapSwitchPlayer) {
-    switchVisiblePlayerDuringTap(video);
-  }
+  const switchedDuringTap = canTapSwitchPlayer && switchVisiblePlayerDuringTap(video);
   if (options.remember !== false) {
     addHistory(video);
   }
   if (changed) {
     updateNavigationHistory(options);
   }
-  render();
+  if (switchedDuringTap) {
+    if (!refreshWatchAfterInlinePlayerSwitch()) {
+      render();
+    }
+  } else {
+    render();
+  }
   if (preserveFullscreen) {
     restorePlayerFullscreen();
   }
@@ -3796,6 +3800,54 @@ function syncPlayerShellChild(retainedShell, nextShell, selector) {
   }
   if (!retainedChild && nextChild) {
     retainedShell.append(nextChild);
+  }
+}
+
+function refreshWatchAfterInlinePlayerSwitch() {
+  const currentWatch = app.querySelector(".watch-view");
+  const currentShell = currentWatch?.querySelector(".player-shell");
+  const currentDetail = currentWatch?.querySelector(".watch-detail");
+  if (state.view !== "watch" || !currentWatch || !currentShell || !currentDetail) {
+    return false;
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = renderWatch();
+  const nextWatch = template.content.querySelector(".watch-view");
+  const nextDetail = nextWatch?.querySelector(".watch-detail");
+  if (!nextWatch || !nextDetail) {
+    return false;
+  }
+
+  currentShell.dataset.videoId = state.activeVideoId;
+  syncInlinePlayerChild(currentShell, nextWatch, ".poster-button", (poster) => {
+    poster.setAttribute("hidden", "");
+    poster.classList.add("is-loading");
+    poster.setAttribute("aria-busy", "true");
+  });
+  syncInlinePlayerChild(currentShell, nextWatch, ".player-fallback");
+  currentDetail.replaceWith(nextDetail);
+  setFullscreenButtonState(currentShell.classList.contains("app-fullscreen"));
+  scheduleInfiniteVideoScroll();
+  return true;
+}
+
+function syncInlinePlayerChild(currentShell, nextWatch, selector, beforeInsert) {
+  const currentChild = currentShell.querySelector(selector);
+  const nextChild = nextWatch.querySelector(selector);
+  if (nextChild && beforeInsert) {
+    beforeInsert(nextChild);
+  }
+  if (currentChild && nextChild) {
+    currentChild.replaceWith(nextChild);
+    return;
+  }
+  if (currentChild && !nextChild) {
+    currentChild.remove();
+    return;
+  }
+  if (!currentChild && nextChild) {
+    currentShell.append(nextChild);
   }
 }
 
