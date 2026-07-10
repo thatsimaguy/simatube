@@ -17,7 +17,7 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const CACHE_CLEANUP_VERSION = "2026-07-progress-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-resume-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -4022,7 +4022,6 @@ function renderWatch() {
   }[commentsStatus] || "Load";
   const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
   const autoplayPending = state.pendingAutoplayVideoId === video.id;
-  const progress = watchProgressPercent(video);
 
   return `
     <section class="watch-view">
@@ -4035,7 +4034,6 @@ function renderWatch() {
           <span class="big-play" aria-hidden="true">${icon("play")}</span>
           <span class="duration">${escapeHtml(video.duration)}</span>
         </button>
-        ${renderWatchProgressBar(progress, "player-progress", true)}
         ${state.playerError ? `
           <div class="player-fallback">
             <strong>Playback blocked here</strong>
@@ -4462,6 +4460,19 @@ function watchProgressPercent(video) {
   return clampNumber(progress.percent, 0, 100, 0);
 }
 
+function resumeStartSeconds(video) {
+  const progress = state.watchProgressById[video?.id || ""];
+  if (!progress) {
+    return 0;
+  }
+  const duration = Number(progress.duration || video?.durationSeconds || 0);
+  const current = Number(progress.current || 0);
+  if (!duration || current < 5 || progress.percent >= 95 || current >= duration - 8) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(current - 2));
+}
+
 function renderWatchProgressBar(percent, extraClass = "", always = false) {
   const value = clampNumber(percent, 0, 100, 0);
   if (value < 1 && !always) {
@@ -4587,6 +4598,7 @@ function mountPlayer(autoplay) {
   }
 
   state.playerVideoId = video.id;
+  const startSeconds = resumeStartSeconds(video);
   let player = null;
   try {
     player = new window.YT.Player(mount, {
@@ -4603,6 +4615,7 @@ function mountPlayer(autoplay) {
         mute: autoplay ? 1 : 0,
         playsinline: 1,
         rel: 0,
+        start: startSeconds,
       },
       events: {
         onReady: () => {
@@ -4690,6 +4703,8 @@ function startAutoplayPlayback(player, videoId) {
   } catch {}
   window.setTimeout(() => retryAutoplayPlayback(player, videoId), 350);
   window.setTimeout(() => retryAutoplayPlayback(player, videoId), 1200);
+  window.setTimeout(() => restorePlayerAudio(player, videoId), 850);
+  window.setTimeout(() => restorePlayerAudio(player, videoId), 1800);
 }
 
 function retryAutoplayPlayback(player, videoId) {
@@ -4708,7 +4723,21 @@ function retryAutoplayPlayback(player, videoId) {
     try {
       player.playVideo?.();
     } catch {}
+    return;
   }
+  restorePlayerAudio(player, videoId);
+}
+
+function restorePlayerAudio(player, videoId) {
+  if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
+    return;
+  }
+  try {
+    player.unMute?.();
+  } catch {}
+  try {
+    player.setVolume?.(100);
+  } catch {}
 }
 
 function startProgressSync() {
@@ -4910,7 +4939,7 @@ function playActive() {
   poster?.setAttribute("hidden", "");
   if (state.player?.loadVideoById) {
     forceCaptionsOff(state.player);
-    state.player.loadVideoById({ videoId: video.id });
+    state.player.loadVideoById({ videoId: video.id, startSeconds: resumeStartSeconds(video) });
     startAutoplayPlayback(state.player, video.id);
     return;
   }

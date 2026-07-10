@@ -1337,22 +1337,6 @@ html.player-fullscreen-open .screen-watch {
   border: 0;
 }
 
-.player-progress {
-  z-index: 12;
-  height: 4px;
-  opacity: .96;
-  background: rgba(255, 255, 255, .1);
-  transition: opacity .2s ease;
-}
-
-.player-progress > span {
-  box-shadow: 0 0 14px rgba(255, 0, 61, .7);
-}
-
-html.player-fullscreen-controls-hidden .player-progress {
-  opacity: 0;
-}
-
 .player-fullscreen-button {
   width: 44px;
   height: 44px;
