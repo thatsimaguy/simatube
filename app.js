@@ -3045,13 +3045,6 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
-function cssEscape(value = "") {
-  if (window.CSS?.escape) {
-    return window.CSS.escape(String(value));
-  }
-  return String(value).replace(/["\\]/g, "\\$&");
-}
-
 function currentVideo() {
   return findVideo(state.activeVideoId)
     || state.queue[0]
@@ -4801,11 +4794,6 @@ function updateProgressFromPlayer(options = {}) {
 }
 
 function updateProgressDom(videoId, percent) {
-  const shell = document.querySelector(`.player-shell[data-video-id="${cssEscape(videoId)}"]`);
-  const fill = shell?.querySelector(".player-progress > span");
-  if (fill) {
-    fill.style.width = `${clampNumber(percent, 0, 100, 0)}%`;
-  }
 }
 
 function destroyPlayer() {
