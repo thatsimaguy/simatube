@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-fast-home-refresh-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-real-home-refresh-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -202,6 +202,7 @@ const state = {
   homeFeedAppendLoading: false,
   homeDiscoveryPageTokens: {},
   homeSessionSeed: createHomeSessionSeed(),
+  homeRefreshCount: 0,
   homeFeedStatus: "idle",
   homeFeedError: "",
   usingCachedPersonalFeed: false,
@@ -1312,7 +1313,9 @@ async function loadPopularHome(options = {}) {
   try {
     const popularVideos = await loadPopularVideos();
     const rankedPopular = rankHomeCandidates(popularVideos.map((video) => ({ video, source: "popular" })));
-    state.homeFeed = rankedPopular.length ? rankedPopular : demoVideos;
+    state.homeFeed = options.refresh
+      ? rotateHomeFeedForRefresh(rankedPopular.length ? rankedPopular : demoVideos)
+      : rankedPopular.length ? rankedPopular : demoVideos;
     state.queue = state.homeFeed;
     state.homeFeedLoaded = true;
     state.homeFeedStatus = "ready";
@@ -1820,10 +1823,24 @@ function cancelHomeFeedRequest() {
   state.homeFeedLoadScheduled = false;
 }
 
-function prepareHomeRefresh() {
+function prepareHomeRefresh(options = {}) {
   state.homeSessionSeed = createHomeSessionSeed();
-  state.homeDiscoveryPageTokens = {};
+  if (!options.keepDiscoveryPageTokens) {
+    state.homeDiscoveryPageTokens = {};
+  }
   state.visibleRowsBySource.home = initialRowsForSource("home");
+}
+
+function rotateHomeFeedForRefresh(videos = []) {
+  if (!state.homeRefreshCount || videos.length < 2) {
+    return videos;
+  }
+  const step = Math.max(1, Math.min(initialRowsForSource("home"), videos.length - 1));
+  const offset = (state.homeRefreshCount * step) % videos.length;
+  if (!offset) {
+    return videos;
+  }
+  return [...videos.slice(offset), ...videos.slice(0, offset)];
 }
 
 function refreshHomeFromCache() {
@@ -1835,7 +1852,7 @@ function refreshHomeFromCache() {
     ...state.localHistory.map((video) => ({ video, source: "interest" })),
     ...cachedVideos.map((video) => ({ video, source: state.subscriptionIdsByChannel[video.channelId] ? "subscription" : "popular" })),
   ];
-  const refreshed = rankHomeCandidates(candidates);
+  const refreshed = rotateHomeFeedForRefresh(rankHomeCandidates(candidates));
   if (!refreshed.length) {
     return false;
   }
@@ -1900,10 +1917,11 @@ function loadPersonalHomeFeed(options = {}) {
         return false;
       }
       if (feed.length) {
-        state.homeFeed = feed;
+        const nextFeed = options.refresh ? rotateHomeFeedForRefresh(feed) : feed;
+        state.homeFeed = nextFeed;
         state.usingCachedPersonalFeed = true;
         if (state.view === "home" || !state.queue.length) {
-          state.queue = feed;
+          state.queue = nextFeed;
         }
         state.homeFeedLoaded = true;
         state.homeFeedStatus = "ready";
@@ -2737,7 +2755,8 @@ function pruneCommentsCache() {
 
 async function refreshHomeFeed() {
   cancelHomeFeedRequest();
-  prepareHomeRefresh();
+  state.homeRefreshCount += 1;
+  prepareHomeRefresh({ keepDiscoveryPageTokens: true });
   const usedCache = refreshHomeFromCache();
   state.homeFeedLoaded = false;
   state.homeFeedStatus = state.homeFeed.length ? "refreshing" : "loading";
@@ -2747,7 +2766,7 @@ async function refreshHomeFeed() {
   }
 
   if (state.auth.accessToken) {
-    loadPersonalHomeFeed({ refresh: true, skipPrepare: true });
+    loadPersonalHomeFeed({ refresh: true, skipPrepare: true, append: true });
     window.setTimeout(() => {
       loadSubscriptionsAndFeed({
         refresh: true,
@@ -5025,7 +5044,7 @@ function icon(name) {
     podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
     radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
     refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
-    refreshHome: '<path d="M3.5 12a8.5 8.5 0 0 1 14.4-6.1" stroke-width="3.25"/><path d="M18 3.2h3.2v3.2" stroke-width="3.25"/><path d="M20.5 12a8.5 8.5 0 0 1-14.4 6.1" stroke-width="3.25"/><path d="M6 20.8H2.8v-3.2" stroke-width="3.25"/>',
+    refreshHome: '<path d="M19.4 10.6A7.8 7.8 0 0 0 5.8 6.1" stroke-width="3.8"/><path d="M5.1 4.2v5.7h5.7" stroke-width="3.8"/><path d="M4.6 13.4a7.8 7.8 0 0 0 13.6 4.5" stroke-width="3.8"/><path d="M18.9 19.8v-5.7h-5.7" stroke-width="3.8"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
