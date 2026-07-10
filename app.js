@@ -17,9 +17,10 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const CACHE_CLEANUP_VERSION = "2026-07-fyp-v2";
+const CACHE_CLEANUP_VERSION = "2026-07-progress-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
+const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
 const PERSONAL_CACHE_FRESH_MS = 30 * 60 * 1000;
 const PERSONAL_CACHE_MAX_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INITIAL_VIDEO_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
@@ -31,6 +32,7 @@ const MAX_CHANNEL_VIDEO_CACHES = 12;
 const MAX_SEARCH_CACHE_ENTRIES = 8;
 const MAX_COMMENTS_CACHE_ENTRIES = 6;
 const MAX_SAVED_VIDEOS = 50;
+const MAX_PROGRESS_ENTRIES = 180;
 const LIBRARY_INITIAL_VIDEO_ROWS = 6;
 const INITIAL_SUBSCRIPTION_CHANNELS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
 const SUBSCRIPTION_CHANNEL_INCREMENT = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
@@ -116,6 +118,7 @@ let serverSessionRefreshPromise = null;
 let pendingRenderFocus = null;
 let bootStableTimer = 0;
 let infiniteScrollRaf = 0;
+let progressSyncTimer = 0;
 let portraitLockTimer = 0;
 let portraitLockPromise = null;
 let lastPortraitLockAttempt = 0;
@@ -172,6 +175,7 @@ const state = {
   savedIds: new Set([...storedSavedIds, ...storedSavedVideos.map((video) => video.id)]),
   savedVideos: storedSavedVideos,
   localHistory: readArray("yt_history").map(compactStoredVideo).filter((video) => video?.id).slice(0, 30),
+  watchProgressById: readWatchProgress(),
   searchHistory: readArray("yt_search_history").filter((query) => typeof query === "string").slice(0, 20),
   onboarded: readBoolean("yt_onboarded", false),
   fullscreenControlsTimer: 0,
@@ -224,6 +228,8 @@ boot();
 clearOldServiceWorkers();
 window.addEventListener("pagehide", (event) => {
   clearPlayerFullscreenControlsTimer();
+  updateProgressFromPlayer({ save: true });
+  stopProgressSync();
   cancelSubscriptionRequest();
   cancelHomeFeedRequest();
   cancelSearchRequest();
@@ -679,6 +685,49 @@ function writeJson(key, value) {
   } catch {
     showToast("Local storage is unavailable.");
   }
+}
+
+function readWatchProgress() {
+  const raw = readJson(WATCH_PROGRESS_KEY, {});
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+
+  return Object.fromEntries(Object.entries(raw)
+    .map(([videoId, value]) => {
+      const progress = sanitizeWatchProgress(value);
+      return progress ? [videoId, progress] : null;
+    })
+    .filter(Boolean)
+    .slice(-MAX_PROGRESS_ENTRIES));
+}
+
+function sanitizeWatchProgress(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const duration = clampNumber(value.duration, 0, 24 * 60 * 60, 0);
+  const current = clampNumber(value.current, 0, Math.max(duration, 1), 0);
+  const percent = duration > 0
+    ? clampNumber((current / duration) * 100, 0, 100, 0)
+    : clampNumber(value.percent, 0, 100, 0);
+  const updatedAt = clampNumber(value.updatedAt, 0, Date.now(), Date.now());
+  return {
+    current: Math.round(current),
+    duration: Math.round(duration),
+    percent: Math.round(percent * 10) / 10,
+    completed: percent >= 92,
+    updatedAt,
+  };
+}
+
+function saveWatchProgress() {
+  const entries = Object.entries(state.watchProgressById)
+    .filter(([, progress]) => progress?.percent >= 1)
+    .sort((a, b) => Number(a[1].updatedAt || 0) - Number(b[1].updatedAt || 0))
+    .slice(-MAX_PROGRESS_ENTRIES);
+  state.watchProgressById = Object.fromEntries(entries);
+  writeJson(WATCH_PROGRESS_KEY, state.watchProgressById);
 }
 
 function readPersonalCache() {
@@ -2996,6 +3045,13 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+function cssEscape(value = "") {
+  if (window.CSS?.escape) {
+    return window.CSS.escape(String(value));
+  }
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
 function currentVideo() {
   return findVideo(state.activeVideoId)
     || state.queue[0]
@@ -3124,6 +3180,10 @@ function openWatch(videoId, queue = [], options = {}) {
   }
 
   const changed = state.view !== "watch" || state.activeVideoId !== videoId;
+  if (changed && state.view === "watch") {
+    updateProgressFromPlayer({ save: true });
+    stopProgressSync();
+  }
   const preserveFullscreen = Boolean(options.preserveFullscreen && isPlayerFullscreen());
   if (preserveFullscreen) {
     clearPlayerFullscreenControlsTimer();
@@ -3282,6 +3342,8 @@ function setView(view, options = {}) {
     cancelSearchRequest();
   }
   if (changed && state.view === "watch") {
+    updateProgressFromPlayer({ save: true });
+    stopProgressSync();
     state.commentsLoadVersion += 1;
     cancelCommentsRequest();
   }
@@ -3960,6 +4022,7 @@ function renderWatch() {
   }[commentsStatus] || "Load";
   const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
   const autoplayPending = state.pendingAutoplayVideoId === video.id;
+  const progress = watchProgressPercent(video);
 
   return `
     <section class="watch-view">
@@ -3972,6 +4035,7 @@ function renderWatch() {
           <span class="big-play" aria-hidden="true">${icon("play")}</span>
           <span class="duration">${escapeHtml(video.duration)}</span>
         </button>
+        ${renderWatchProgressBar(progress, "player-progress", true)}
         ${state.playerError ? `
           <div class="player-fallback">
             <strong>Playback blocked here</strong>
@@ -4345,9 +4409,10 @@ function renderVideoRow(video, source, itemIndex = -1) {
   const saved = state.savedIds.has(video.id);
   const watched = state.localHistory.some((item) => item.id === video.id);
   const reason = videoFeedReason(video, source);
+  const progress = watchProgressPercent(video);
   const stateClass = [
     saved ? "is-saved" : "",
-    watched ? "is-watched" : "",
+    watched || progress >= 92 ? "is-watched" : "",
     itemIndex >= 0 && itemIndex < 6 ? "motion-entry" : "",
   ].filter(Boolean).join(" ");
   const entryStyle = itemIndex >= 0 && itemIndex < 6 ? ` style="--item-index: ${itemIndex};"` : "";
@@ -4363,6 +4428,7 @@ function renderVideoRow(video, source, itemIndex = -1) {
         ${saved ? `<span class="saved-badge">${icon("check")}Saved</span>` : ""}
         ${watched ? `<span class="watched-badge">${icon("history")}Watched</span>` : ""}
         ${video.duration ? `<span class="duration">${escapeHtml(video.duration)}</span>` : ""}
+        ${renderWatchProgressBar(progress)}
       </button>
       <div class="video-copy">
         <button class="channel-avatar-button" type="button" data-action="open-channel" data-channel-id="${escapeHtml(video.channelId)}" aria-label="${escapeHtml(video.channelTitle)} channel">
@@ -4386,6 +4452,23 @@ function renderVideoRow(video, source, itemIndex = -1) {
 
 function videoFeedReason(video, source) {
   return "";
+}
+
+function watchProgressPercent(video) {
+  const progress = state.watchProgressById[video?.id || ""];
+  if (!progress) {
+    return 0;
+  }
+  return clampNumber(progress.percent, 0, 100, 0);
+}
+
+function renderWatchProgressBar(percent, extraClass = "", always = false) {
+  const value = clampNumber(percent, 0, 100, 0);
+  if (value < 1 && !always) {
+    return "";
+  }
+  const className = `watch-progress${extraClass ? ` ${extraClass}` : ""}`;
+  return `<span class="${escapeHtml(className)}" aria-hidden="true"><span style="width: ${value}%;"></span></span>`;
 }
 
 function channelAvatarFor(video) {
@@ -4537,6 +4620,13 @@ function mountPlayer(autoplay) {
         onError: (event) => handlePlayerError(event.data, video.id),
         onStateChange: (event) => {
           forceCaptionsOff(player);
+          if (event.data === window.YT?.PlayerState?.PLAYING) {
+            startProgressSync();
+          }
+          if (event.data === window.YT?.PlayerState?.PAUSED) {
+            updateProgressFromPlayer({ save: true });
+            stopProgressSync();
+          }
           if (event.data === window.YT?.PlayerState?.CUED
             && state.view === "watch"
             && state.activeVideoId === video.id) {
@@ -4545,6 +4635,8 @@ function mountPlayer(autoplay) {
           if (state.player === player
             && state.playerVideoId === video.id
             && event.data === window.YT.PlayerState.ENDED) {
+            updateProgressFromPlayer({ completed: true, save: true });
+            stopProgressSync();
             nextVideo({ autoplay: true, preserveFullscreen: true });
           }
         },
@@ -4619,7 +4711,77 @@ function retryAutoplayPlayback(player, videoId) {
   }
 }
 
+function startProgressSync() {
+  if (progressSyncTimer) {
+    return;
+  }
+  updateProgressFromPlayer();
+  progressSyncTimer = window.setInterval(() => updateProgressFromPlayer(), 1500);
+}
+
+function stopProgressSync() {
+  if (!progressSyncTimer) {
+    return;
+  }
+  window.clearInterval(progressSyncTimer);
+  progressSyncTimer = 0;
+}
+
+function updateProgressFromPlayer(options = {}) {
+  const player = state.player;
+  const videoId = state.playerVideoId || state.activeVideoId;
+  if (!player || !videoId) {
+    return;
+  }
+
+  let duration = 0;
+  let current = 0;
+  try {
+    duration = Number(player.getDuration?.() || 0);
+  } catch {}
+  try {
+    current = Number(player.getCurrentTime?.() || 0);
+  } catch {}
+
+  const video = findVideo(videoId);
+  duration = duration || Number(video?.durationSeconds || 0);
+  if (options.completed && duration > 0) {
+    current = duration;
+  }
+  if (!duration || current < 1) {
+    return;
+  }
+
+  const percent = clampNumber((current / duration) * 100, 0, 100, 0);
+  if (percent < 1 && !options.completed) {
+    return;
+  }
+
+  const progress = {
+    current: Math.round(Math.min(current, duration)),
+    duration: Math.round(duration),
+    percent: Math.round((options.completed ? 100 : percent) * 10) / 10,
+    completed: options.completed || percent >= 92,
+    updatedAt: Date.now(),
+  };
+  state.watchProgressById[videoId] = progress;
+  updateProgressDom(videoId, progress.percent);
+  if (options.save || progress.percent >= 98) {
+    saveWatchProgress();
+  }
+}
+
+function updateProgressDom(videoId, percent) {
+  const shell = document.querySelector(`.player-shell[data-video-id="${cssEscape(videoId)}"]`);
+  const fill = shell?.querySelector(".player-progress > span");
+  if (fill) {
+    fill.style.width = `${clampNumber(percent, 0, 100, 0)}%`;
+  }
+}
+
 function destroyPlayer() {
+  updateProgressFromPlayer({ save: true });
+  stopProgressSync();
   const player = state.player;
   state.player = null;
   state.playerVideoId = "";

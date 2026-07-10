@@ -866,6 +866,27 @@ label:focus-visible {
   z-index: 2;
 }
 
+.watch-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  height: 3px;
+  background: rgba(255, 255, 255, .18);
+  pointer-events: none;
+}
+
+.watch-progress > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 0 999px 999px 0;
+  background: linear-gradient(90deg, #ff003d, #ff2f4f);
+  box-shadow: 0 0 10px rgba(255, 0, 61, .55);
+  transition: width .35s ease;
+}
+
 .saved-badge {
   position: absolute;
   left: 8px;
@@ -1314,6 +1335,22 @@ html.player-fullscreen-open .screen-watch {
 .poster-button img {
   display: block;
   border: 0;
+}
+
+.player-progress {
+  z-index: 12;
+  height: 4px;
+  opacity: .96;
+  background: rgba(255, 255, 255, .1);
+  transition: opacity .2s ease;
+}
+
+.player-progress > span {
+  box-shadow: 0 0 14px rgba(255, 0, 61, .7);
+}
+
+html.player-fullscreen-controls-hidden .player-progress {
+  opacity: 0;
 }
 
 .player-fullscreen-button {
