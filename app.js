@@ -17,7 +17,9 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const CACHE_CLEANUP_VERSION = "2026-07-resume-v2";
+const AUTOPLAY_RECOVERY_MS = 4500;
+const AUTOPLAY_SOUND_RESTORE_DELAY_MS = 850;
+const CACHE_CLEANUP_VERSION = "2026-07-autoplay-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -214,6 +216,11 @@ const state = {
   player: null,
   playerVideoId: "",
   pendingAutoplayVideoId: "",
+  autoplayRecoveryVideoId: "",
+  autoplayRecoveryStartedAt: 0,
+  autoplayRecoveryUntil: 0,
+  autoplayRecoveryAttempts: 0,
+  autoplaySoundRestored: false,
   playerReady: false,
   playerError: null,
   ytApiReady: false,
@@ -4628,10 +4635,16 @@ function mountPlayer(autoplay) {
           forceCaptionsOff(player);
           if (event.data === window.YT?.PlayerState?.PLAYING) {
             startProgressSync();
+            if (autoplayRecoveryActive(video.id) && state.autoplaySoundRestored) {
+              settleAutoplayRecovery(player, video.id);
+            }
           }
           if (event.data === window.YT?.PlayerState?.PAUSED) {
             updateProgressFromPlayer({ save: true });
             stopProgressSync();
+            if (autoplayRecoveryActive(video.id)) {
+              resumeAutoplayIfPaused(player, video.id);
+            }
           }
           if (event.data === window.YT?.PlayerState?.CUED
             && state.view === "watch"
@@ -4679,10 +4692,61 @@ function forceCaptionsOff(player = state.player) {
   } catch {}
 }
 
+function beginAutoplayRecovery(videoId) {
+  state.autoplayRecoveryVideoId = videoId;
+  state.autoplayRecoveryStartedAt = Date.now();
+  state.autoplayRecoveryUntil = state.autoplayRecoveryStartedAt + AUTOPLAY_RECOVERY_MS;
+  state.autoplayRecoveryAttempts = 0;
+  state.autoplaySoundRestored = false;
+}
+
+function autoplayRecoveryActive(videoId) {
+  return state.autoplayRecoveryVideoId === videoId
+    && state.activeVideoId === videoId
+    && Date.now() < state.autoplayRecoveryUntil;
+}
+
+function clearAutoplayRecovery(videoId) {
+  if (state.autoplayRecoveryVideoId !== videoId) {
+    return;
+  }
+
+  state.autoplayRecoveryVideoId = "";
+  state.autoplayRecoveryStartedAt = 0;
+  state.autoplayRecoveryUntil = 0;
+  state.autoplayRecoveryAttempts = 0;
+  state.autoplaySoundRestored = false;
+}
+
+function shouldRestoreAutoplaySound(videoId) {
+  return autoplayRecoveryActive(videoId)
+    && Date.now() - state.autoplayRecoveryStartedAt >= AUTOPLAY_SOUND_RESTORE_DELAY_MS;
+}
+
+function settleAutoplayRecovery(player, videoId) {
+  window.setTimeout(() => {
+    if (!autoplayRecoveryActive(videoId)
+      || state.player !== player
+      || state.playerVideoId !== videoId
+      || state.activeVideoId !== videoId) {
+      return;
+    }
+
+    let playerState = -1;
+    try {
+      playerState = player.getPlayerState?.() ?? -1;
+    } catch {}
+    if (playerState === window.YT?.PlayerState?.PLAYING) {
+      clearAutoplayRecovery(videoId);
+    }
+  }, 1000);
+}
+
 function startAutoplayPlayback(player, videoId) {
   if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
     return;
   }
+  beginAutoplayRecovery(videoId);
   const poster = document.querySelector(".poster-button");
   poster?.setAttribute("hidden", "");
   poster?.classList.remove("is-loading");
@@ -4694,10 +4758,11 @@ function startAutoplayPlayback(player, videoId) {
   try {
     player.playVideo?.();
   } catch {}
-  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 350);
-  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 1200);
-  window.setTimeout(() => restorePlayerAudio(player, videoId), 850);
+  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 300);
+  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 700);
+  window.setTimeout(() => restorePlayerAudio(player, videoId), 950);
   window.setTimeout(() => restorePlayerAudio(player, videoId), 1800);
+  window.setTimeout(() => restorePlayerAudio(player, videoId), 2800);
 }
 
 function retryAutoplayPlayback(player, videoId) {
@@ -4709,6 +4774,10 @@ function retryAutoplayPlayback(player, videoId) {
   try {
     playerState = player.getPlayerState?.() ?? -1;
   } catch {}
+  if (state.autoplaySoundRestored || shouldRestoreAutoplaySound(videoId)) {
+    restorePlayerAudio(player, videoId);
+    return;
+  }
   if (playerState !== window.YT?.PlayerState?.PLAYING) {
     try {
       player.mute?.();
@@ -4722,15 +4791,58 @@ function retryAutoplayPlayback(player, videoId) {
 }
 
 function restorePlayerAudio(player, videoId) {
-  if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
+  if (!autoplayRecoveryActive(videoId)
+    || state.player !== player
+    || state.playerVideoId !== videoId
+    || state.activeVideoId !== videoId) {
     return;
   }
+  state.autoplaySoundRestored = true;
   try {
     player.unMute?.();
   } catch {}
   try {
     player.setVolume?.(100);
   } catch {}
+  try {
+    player.playVideo?.();
+  } catch {}
+  window.setTimeout(() => resumeAutoplayIfPaused(player, videoId), 180);
+  window.setTimeout(() => resumeAutoplayIfPaused(player, videoId), 650);
+  settleAutoplayRecovery(player, videoId);
+}
+
+function resumeAutoplayIfPaused(player, videoId) {
+  if (!autoplayRecoveryActive(videoId)
+    || state.player !== player
+    || state.playerVideoId !== videoId
+    || state.activeVideoId !== videoId) {
+    return;
+  }
+
+  let playerState = -1;
+  try {
+    playerState = player.getPlayerState?.() ?? -1;
+  } catch {}
+  if (playerState === window.YT?.PlayerState?.PLAYING) {
+    settleAutoplayRecovery(player, videoId);
+    return;
+  }
+  if (state.autoplayRecoveryAttempts >= 5) {
+    return;
+  }
+  state.autoplayRecoveryAttempts += 1;
+  forceCaptionsOff(player);
+  try {
+    player.unMute?.();
+  } catch {}
+  try {
+    player.setVolume?.(100);
+  } catch {}
+  try {
+    player.playVideo?.();
+  } catch {}
+  window.setTimeout(() => resumeAutoplayIfPaused(player, videoId), 450);
 }
 
 function startProgressSync() {
