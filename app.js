@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-real-home-refresh-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-music-mode-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -141,6 +141,7 @@ const state = {
   authResult: new URL(window.location.href).searchParams.get("auth") || "",
   config: normalizeConfig(window.YT_APP_CONFIG || {}),
   activeVideoId: readString("yt_active_video_id", demoVideos[0].id),
+  musicMode: readBoolean("yt_music_mode", false),
   homeFeed: [],
   searchResults: [],
   subscriptions: [],
@@ -4053,6 +4054,7 @@ function hydrateRetainedPlayerShell(retainedShell, nextShell) {
 
   syncPlayerShellChild(retainedShell, nextShell, ".poster-button");
   syncPlayerShellChild(retainedShell, nextShell, ".player-fallback");
+  syncPlayerShellChild(retainedShell, nextShell, ".music-mode-visual");
 }
 
 function syncPlayerShellChild(retainedShell, nextShell, selector) {
@@ -4489,7 +4491,7 @@ function renderWatch() {
 
   return `
     <section class="watch-view">
-      <div class="player-shell" data-video-id="${escapeHtml(video.id)}">
+      <div class="player-shell${state.musicMode ? " music-mode-on" : ""}" data-video-id="${escapeHtml(video.id)}">
         <div id="playerMount"></div>
         <button class="poster-button${autoplayPending ? " is-loading" : ""}" type="button" data-action="play" aria-label="Play video"${autoplayPending ? ' hidden aria-busy="true"' : ""}>
           ${video.posterUrl || video.thumbnailUrl
@@ -4504,6 +4506,7 @@ function renderWatch() {
             <span>${escapeHtml(state.playerError)}</span>
           </div>
         ` : ""}
+        ${state.musicMode ? renderMusicModeVisual(video) : ""}
       </div>
       <section class="watch-detail">
         <div class="title-row">
@@ -4528,6 +4531,7 @@ function renderWatch() {
         </div>
         <div class="action-row" aria-label="Video actions">
           ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
+          ${actionPill("music-mode", state.musicMode ? "Music on" : "Music", "music", state.musicMode, true)}
           ${actionPill("save", saved ? "Saved" : "Save", saved ? "bookmark-filled" : "bookmark", saved, true)}
         </div>
         ${renderDescription(video)}
@@ -4547,6 +4551,28 @@ function renderWatch() {
         ${renderCompactQueue()}
       </section>
     </section>
+  `;
+}
+
+function renderMusicModeVisual(video) {
+  const artUrl = video.posterUrl || video.thumbnailUrl || "";
+  const art = artUrl
+    ? `<img src="${escapeHtml(artUrl)}" alt="" decoding="async" data-image-fallback="thumbnail" data-fallback-initial="${escapeHtml(channelInitial(video.title))}" />`
+    : `<span>${escapeHtml(channelInitial(video.title))}</span>`;
+  return `
+    <div class="music-mode-visual" aria-hidden="true">
+      ${artUrl ? `<img class="music-mode-backdrop" src="${escapeHtml(artUrl)}" alt="" decoding="async" />` : ""}
+      <div class="vinyl-stage">
+        <div class="vinyl-disc">
+          <span class="vinyl-label">${art}</span>
+        </div>
+        <div class="vinyl-arm"><span></span></div>
+      </div>
+      <div class="music-mode-caption">
+        <strong>${escapeHtml(video.title)}</strong>
+        <span>${escapeHtml(video.channelTitle)}</span>
+      </div>
+    </div>
   `;
 }
 
@@ -5044,7 +5070,7 @@ function icon(name) {
     podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
     radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
     refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
-    refreshHome: '<path d="M19.4 10.6A7.8 7.8 0 0 0 5.8 6.1" stroke-width="3.8"/><path d="M5.1 4.2v5.7h5.7" stroke-width="3.8"/><path d="M4.6 13.4a7.8 7.8 0 0 0 13.6 4.5" stroke-width="3.8"/><path d="M18.9 19.8v-5.7h-5.7" stroke-width="3.8"/>',
+    refreshHome: '<path d="M19.4 10.6A7.8 7.8 0 0 0 5.8 6.1" stroke-width="3.05"/><path d="M5.1 4.2v5.7h5.7" stroke-width="3.05"/><path d="M4.6 13.4a7.8 7.8 0 0 0 13.6 4.5" stroke-width="3.05"/><path d="M18.9 19.8v-5.7h-5.7" stroke-width="3.05"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
@@ -5922,6 +5948,11 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "like") {
     await rateActiveVideo();
+  }
+  if (action === "music-mode") {
+    state.musicMode = !state.musicMode;
+    writeJson("yt_music_mode", state.musicMode);
+    render();
   }
   if (action === "subscribe") {
     await subscribeToActiveChannel();
