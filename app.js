@@ -17,8 +17,8 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const AUTOPLAY_RECOVERY_MS = 4200;
-const CACHE_CLEANUP_VERSION = "2026-07-autoplay-sound-v1";
+const AUTOPLAY_RECOVERY_MS = 3600;
+const CACHE_CLEANUP_VERSION = "2026-07-autoplay-sound-v2";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -4659,7 +4659,7 @@ function mountPlayer(autoplay) {
             updateProgressFromPlayer({ save: true });
             stopProgressSync();
             if (autoplayRecoveryActive(video.id) && !state.autoplayHasStarted) {
-              fallbackMutedAutoplay(player, video.id);
+              retrySoundAutoplay(player, video.id);
             }
           }
           if (event.data === window.YT?.PlayerState?.CUED
@@ -4758,15 +4758,6 @@ function playerPlaybackState(player) {
   }
 }
 
-function playMuted(player) {
-  try {
-    player.mute?.();
-  } catch {}
-  try {
-    player.playVideo?.();
-  } catch {}
-}
-
 function playWithSound(player) {
   try {
     player.unMute?.();
@@ -4814,8 +4805,8 @@ function startAutoplayPlayback(player, videoId) {
   playWithSound(player);
   window.setTimeout(() => retrySoundAutoplay(player, videoId), 300);
   window.setTimeout(() => retrySoundAutoplay(player, videoId), 850);
-  window.setTimeout(() => fallbackMutedAutoplay(player, videoId), 1500);
-  window.setTimeout(() => ensureAutoplayStarted(player, videoId), 3200);
+  window.setTimeout(() => retrySoundAutoplay(player, videoId), 1500);
+  window.setTimeout(() => ensureSoundAutoplay(player, videoId), 2800);
 }
 
 function retrySoundAutoplay(player, videoId) {
@@ -4835,7 +4826,7 @@ function retrySoundAutoplay(player, videoId) {
   settleAutoplayStart(player, videoId);
 }
 
-function fallbackMutedAutoplay(player, videoId) {
+function ensureSoundAutoplay(player, videoId) {
   if (!autoplayRecoveryActive(videoId)
     || state.player !== player
     || state.playerVideoId !== videoId
@@ -4847,26 +4838,11 @@ function fallbackMutedAutoplay(player, videoId) {
     settleAutoplayStart(player, videoId);
     return;
   }
-  playMuted(player);
-  setPlayerSoundPrompt(true, videoId);
-}
-
-function ensureAutoplayStarted(player, videoId) {
-  if (!autoplayRecoveryActive(videoId)
-    || state.player !== player
-    || state.playerVideoId !== videoId
-    || state.activeVideoId !== videoId) {
-    return;
-  }
-  if (playerPlaybackState(player) === window.YT?.PlayerState?.PLAYING) {
-    syncPlayerSoundPrompt(player, videoId);
-    settleAutoplayStart(player, videoId);
-    return;
-  }
-  playMuted(player);
+  playWithSound(player);
   setPlayerSoundPrompt(true, videoId);
   window.setTimeout(() => {
     if (playerPlaybackState(player) === window.YT?.PlayerState?.PLAYING) {
+      syncPlayerSoundPrompt(player, videoId);
       clearAutoplayRecovery(videoId);
     }
   }, 900);
