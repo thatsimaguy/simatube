@@ -1803,6 +1803,23 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen::after {
   font-size: 11px;
 }
 
+.comments-expand-button {
+  width: calc(100% - 42px);
+  min-height: 38px;
+  justify-content: center;
+  margin: 10px 0 0 42px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .06);
+}
+
+.comments-expand-button svg {
+  transition: transform var(--motion-fast);
+}
+
+.comments-expand-button[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
 .comment-skeleton div {
   width: 100%;
   display: grid;

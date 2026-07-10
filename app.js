@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-comments-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-comments-auto-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -153,6 +153,8 @@ const state = {
   commentsErrorByVideoId: {},
   commentsAbortController: null,
   commentsLoadingVideoId: "",
+  commentsExpandedByVideoId: {},
+  commentsAutoloadTimer: 0,
   likedVideos: [],
   likedVideosLoaded: false,
   ratings: {},
@@ -241,6 +243,7 @@ window.addEventListener("pagehide", (event) => {
   cancelSubscriptionRequest();
   cancelHomeFeedRequest();
   cancelSearchRequest();
+  cancelCommentsAutoload();
   cancelCommentsRequest();
   cancelChannelRequest();
   if (event.persisted) {
@@ -1383,6 +1386,7 @@ async function signOut() {
   state.commentsByVideoId = {};
   state.commentsStatusByVideoId = {};
   state.commentsErrorByVideoId = {};
+  state.commentsExpandedByVideoId = {};
   state.channelLoading = false;
   state.channelLoadingId = "";
   state.subscriptionsLoaded = false;
@@ -2542,6 +2546,39 @@ function cancelCommentsRequest() {
   state.commentsLoadingVideoId = "";
 }
 
+function cancelCommentsAutoload() {
+  if (!state.commentsAutoloadTimer) {
+    return;
+  }
+
+  window.clearTimeout(state.commentsAutoloadTimer);
+  state.commentsAutoloadTimer = 0;
+}
+
+function canAutoloadComments(videoId) {
+  const status = state.commentsStatusByVideoId[videoId] || "idle";
+  return Boolean(videoId
+    && hasApiAccess()
+    && state.view === "watch"
+    && state.activeVideoId === videoId
+    && status === "idle"
+    && !state.pendingActions.has(`comments:${videoId}`));
+}
+
+function scheduleCommentsAutoload(videoId) {
+  cancelCommentsAutoload();
+  if (!canAutoloadComments(videoId)) {
+    return;
+  }
+
+  state.commentsAutoloadTimer = window.setTimeout(() => {
+    state.commentsAutoloadTimer = 0;
+    if (canAutoloadComments(videoId)) {
+      loadComments(videoId, { auto: true });
+    }
+  }, 650);
+}
+
 function pruneCommentsCache() {
   const keys = Object.keys(state.commentsStatusByVideoId);
   let removeCount = Math.max(0, keys.length - MAX_COMMENTS_CACHE_ENTRIES);
@@ -2555,11 +2592,13 @@ function pruneCommentsCache() {
     delete state.commentsByVideoId[key];
     delete state.commentsStatusByVideoId[key];
     delete state.commentsErrorByVideoId[key];
+    delete state.commentsExpandedByVideoId[key];
     removeCount -= 1;
   }
 }
 
 async function loadComments(videoId) {
+  cancelCommentsAutoload();
   cancelCommentsRequest();
   const actionKey = `comments:${videoId}`;
   if (!beginPendingAction(actionKey)) {
@@ -3229,8 +3268,12 @@ function openWatch(videoId, queue = [], options = {}) {
   state.activeVideoId = videoId;
   state.queue = queue.length ? queue : state.homeFeed;
   state.commentsLoadVersion += 1;
+  cancelCommentsAutoload();
   cancelCommentsRequest();
   state.comments = state.commentsByVideoId[videoId] || [];
+  if (changed) {
+    state.commentsExpandedByVideoId[videoId] = false;
+  }
   state.playerError = null;
   state.view = "watch";
   writeJson("yt_active_video_id", videoId);
@@ -3256,6 +3299,7 @@ function openWatch(videoId, queue = [], options = {}) {
     loadYouTubeIframeApi();
   }
   resetScroll();
+  scheduleCommentsAutoload(videoId);
 }
 
 function openChannel(channelId, options = {}) {
@@ -3382,6 +3426,7 @@ function setView(view, options = {}) {
     updateProgressFromPlayer({ save: true });
     stopProgressSync();
     state.commentsLoadVersion += 1;
+    cancelCommentsAutoload();
     cancelCommentsRequest();
   }
   if (changed && state.view === "channel") {
@@ -4154,12 +4199,15 @@ function renderWatch() {
   const liked = state.ratings[video.id] === "like";
   const saved = state.savedIds.has(video.id);
   const commentsStatus = state.commentsStatusByVideoId[video.id] || "idle";
-  const commentsPending = commentsStatus === "loading" || state.pendingActions.has(`comments:${video.id}`);
   const commentsActionLabel = {
     error: "Retry",
     loaded: "Refresh",
     loading: "Loading",
-  }[commentsStatus] || "Load";
+    idle: hasApiAccess() ? "Loading" : "Load",
+  }[commentsStatus] || "Loading";
+  const commentsPending = commentsStatus === "loading"
+    || (commentsStatus === "idle" && hasApiAccess())
+    || state.pendingActions.has(`comments:${video.id}`);
   const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
   const autoplayPending = state.pendingAutoplayVideoId === video.id || autoplayRecoveryActive(video.id);
 
@@ -4257,6 +4305,9 @@ function renderDescription(video) {
 function renderComments(videoId) {
   const status = state.commentsStatusByVideoId[videoId] || "idle";
   const comments = state.commentsByVideoId[videoId] || [];
+  const previewLimit = 3;
+  const expanded = Boolean(state.commentsExpandedByVideoId[videoId]);
+  const visibleComments = expanded ? comments : comments.slice(0, previewLimit);
   if (status === "loading") {
     return `
       <div class="comment-list comments-loading" role="status" aria-label="Loading comments">
@@ -4282,12 +4333,15 @@ function renderComments(videoId) {
     return `<div class="comments-placeholder comments-empty">${icon("message")}<span>No comments yet.</span></div>`;
   }
   if (status === "idle") {
-    return `<div class="comments-placeholder comments-empty">${icon("message")}<span>Load the top comments without leaving the video.</span></div>`;
+    const message = hasApiAccess()
+      ? "Loading the top comments..."
+      : "Comments need the YouTube API key to be available.";
+    return `<div class="comments-placeholder comments-empty">${icon("message")}<span>${escapeHtml(message)}</span></div>`;
   }
 
   return `
     <div class="comment-list">
-      ${comments.map((comment) => `
+      ${visibleComments.map((comment) => `
         <article class="comment">
           ${comment.avatar ? `<img src="${escapeHtml(comment.avatar)}" alt="" width="32" height="32" loading="lazy" decoding="async" data-image-fallback="comment" data-fallback-initial="${escapeHtml(channelInitial(comment.author))}" />` : `<span class="comment-avatar fallback-initial" aria-hidden="true">${escapeHtml(channelInitial(comment.author))}</span>`}
           <div>
@@ -4301,6 +4355,12 @@ function renderComments(videoId) {
         </article>
       `).join("")}
     </div>
+    ${comments.length > previewLimit ? `
+      <button class="text-button comments-expand-button" type="button" data-action="toggle-comments" data-video-id="${escapeHtml(videoId)}" aria-expanded="${expanded ? "true" : "false"}">
+        <span>${expanded ? "Show fewer comments" : `Show all ${comments.length} comments`}</span>
+        ${icon("chevron-down")}
+      </button>
+    ` : ""}
   `;
 }
 
@@ -5556,6 +5616,11 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "comments") {
     await loadComments(currentVideo().id);
+  }
+  if (action === "toggle-comments") {
+    const videoId = target.dataset.videoId || state.activeVideoId;
+    state.commentsExpandedByVideoId[videoId] = !state.commentsExpandedByVideoId[videoId];
+    render();
   }
   if (action === "liked") {
     await loadLikedVideos({ refresh: true });
