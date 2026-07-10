@@ -17,10 +17,8 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const AUTOPLAY_RECOVERY_MS = 7000;
-const AUTOPLAY_SOUND_RESTORE_DELAY_MS = 1800;
-const AUTOPLAY_MAX_SOUND_ATTEMPTS = 3;
-const CACHE_CLEANUP_VERSION = "2026-07-nav-icons-v1";
+const AUTOPLAY_RECOVERY_MS = 5500;
+const CACHE_CLEANUP_VERSION = "2026-07-autoplay-stable-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -217,14 +215,9 @@ const state = {
   player: null,
   playerVideoId: "",
   pendingAutoplayVideoId: "",
-  autoplayRequestedAt: 0,
-  autoplayStartedFromGesture: false,
   autoplayRecoveryVideoId: "",
-  autoplayRecoveryStartedAt: 0,
   autoplayRecoveryUntil: 0,
-  autoplayRecoveryAttempts: 0,
-  autoplaySoundRestored: false,
-  autoplayMutedFallback: false,
+  autoplayHasStarted: false,
   playerReady: false,
   playerError: null,
   ytApiReady: false,
@@ -1016,6 +1009,7 @@ function failPlayerApiLoad(script) {
     return;
   }
   state.pendingAutoplayVideoId = "";
+  clearAutoplayRecovery(state.activeVideoId);
   const poster = document.querySelector(".poster-button");
   poster?.classList.remove("is-loading");
   poster?.removeAttribute("aria-busy");
@@ -3211,12 +3205,8 @@ function openWatch(videoId, queue = [], options = {}) {
   }
   if (options.autoplay) {
     state.pendingAutoplayVideoId = videoId;
-    state.autoplayRequestedAt = Date.now();
-    state.autoplayStartedFromGesture = Boolean(navigator.userActivation?.isActive ?? true);
   } else if (state.pendingAutoplayVideoId && state.pendingAutoplayVideoId !== videoId) {
     state.pendingAutoplayVideoId = "";
-    state.autoplayRequestedAt = 0;
-    state.autoplayStartedFromGesture = false;
     cancelPendingPlayerApiLoad();
   }
   state.activeVideoId = videoId;
@@ -4615,7 +4605,6 @@ function mountPlayer(autoplay) {
 
   state.playerVideoId = video.id;
   const startSeconds = resumeStartSeconds(video);
-  const startWithSound = autoplay && shouldStartAutoplayWithSound(video.id);
   let player = null;
   try {
     player = new window.YT.Player(mount, {
@@ -4629,7 +4618,7 @@ function mountPlayer(autoplay) {
         fs: 0,
         iv_load_policy: 3,
         modestbranding: 1,
-        mute: autoplay && !startWithSound ? 1 : 0,
+        mute: autoplay ? 1 : 0,
         origin: window.location.origin,
         playsinline: 1,
         rel: 0,
@@ -4653,21 +4642,22 @@ function mountPlayer(autoplay) {
           forceCaptionsOff(player);
           if (event.data === window.YT?.PlayerState?.PLAYING) {
             startProgressSync();
-            if (autoplayRecoveryActive(video.id) && (state.autoplaySoundRestored || state.autoplayMutedFallback)) {
-              settleAutoplayRecovery(player, video.id);
+            if (autoplayRecoveryActive(video.id)) {
+              state.autoplayHasStarted = true;
+              settleAutoplayStart(player, video.id);
             }
           }
           if (event.data === window.YT?.PlayerState?.PAUSED) {
             updateProgressFromPlayer({ save: true });
             stopProgressSync();
-            if (autoplayRecoveryActive(video.id)) {
-              resumeAutoplayIfPaused(player, video.id);
+            if (autoplayRecoveryActive(video.id) && !state.autoplayHasStarted) {
+              retryMutedAutoplay(player, video.id);
             }
           }
           if (event.data === window.YT?.PlayerState?.CUED
             && state.view === "watch"
             && state.activeVideoId === video.id) {
-            retryAutoplayPlayback(player, video.id);
+            retryMutedAutoplay(player, video.id);
           }
           if (state.player === player
             && state.playerVideoId === video.id
@@ -4710,19 +4700,10 @@ function forceCaptionsOff(player = state.player) {
   } catch {}
 }
 
-function shouldStartAutoplayWithSound(videoId) {
-  return state.activeVideoId === videoId
-    && state.autoplayStartedFromGesture
-    && Date.now() - state.autoplayRequestedAt < 8000;
-}
-
 function beginAutoplayRecovery(videoId) {
   state.autoplayRecoveryVideoId = videoId;
-  state.autoplayRecoveryStartedAt = Date.now();
-  state.autoplayRecoveryUntil = state.autoplayRecoveryStartedAt + AUTOPLAY_RECOVERY_MS;
-  state.autoplayRecoveryAttempts = 0;
-  state.autoplaySoundRestored = false;
-  state.autoplayMutedFallback = false;
+  state.autoplayRecoveryUntil = Date.now() + AUTOPLAY_RECOVERY_MS;
+  state.autoplayHasStarted = false;
 }
 
 function autoplayRecoveryActive(videoId) {
@@ -4737,21 +4718,11 @@ function clearAutoplayRecovery(videoId) {
   }
 
   state.autoplayRecoveryVideoId = "";
-  state.autoplayRecoveryStartedAt = 0;
   state.autoplayRecoveryUntil = 0;
-  state.autoplayRecoveryAttempts = 0;
-  state.autoplayRequestedAt = 0;
-  state.autoplayStartedFromGesture = false;
-  state.autoplaySoundRestored = false;
-  state.autoplayMutedFallback = false;
+  state.autoplayHasStarted = false;
 }
 
-function shouldRestoreAutoplaySound(videoId) {
-  return autoplayRecoveryActive(videoId)
-    && Date.now() - state.autoplayRecoveryStartedAt >= AUTOPLAY_SOUND_RESTORE_DELAY_MS;
-}
-
-function settleAutoplayRecovery(player, videoId) {
+function settleAutoplayStart(player, videoId) {
   window.setTimeout(() => {
     if (!autoplayRecoveryActive(videoId)
       || state.player !== player
@@ -4767,7 +4738,7 @@ function settleAutoplayRecovery(player, videoId) {
     if (playerState === window.YT?.PlayerState?.PLAYING) {
       clearAutoplayRecovery(videoId);
     }
-  }, 1000);
+  }, 1400);
 }
 
 function playerPlaybackState(player) {
@@ -4787,18 +4758,6 @@ function playMuted(player) {
   } catch {}
 }
 
-function playWithSound(player) {
-  try {
-    player.unMute?.();
-  } catch {}
-  try {
-    player.setVolume?.(100);
-  } catch {}
-  try {
-    player.playVideo?.();
-  } catch {}
-}
-
 function startAutoplayPlayback(player, videoId) {
   if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
     return;
@@ -4809,84 +4768,28 @@ function startAutoplayPlayback(player, videoId) {
   poster?.classList.remove("is-loading");
   poster?.removeAttribute("aria-busy");
   forceCaptionsOff(player);
-  if (shouldStartAutoplayWithSound(videoId)) {
-    playWithSound(player);
-  } else {
-    playMuted(player);
-  }
-  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 300);
-  window.setTimeout(() => retryAutoplayPlayback(player, videoId), 900);
-  window.setTimeout(() => restorePlayerAudio(player, videoId), 2200);
-  window.setTimeout(() => restorePlayerAudio(player, videoId), 3800);
+  playMuted(player);
+  window.setTimeout(() => retryMutedAutoplay(player, videoId), 250);
+  window.setTimeout(() => retryMutedAutoplay(player, videoId), 900);
+  window.setTimeout(() => retryMutedAutoplay(player, videoId), 1900);
+  window.setTimeout(() => retryMutedAutoplay(player, videoId), 3400);
   window.setTimeout(() => ensureAutoplayStarted(player, videoId), 5600);
 }
 
-function retryAutoplayPlayback(player, videoId) {
+function retryMutedAutoplay(player, videoId) {
   if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
     return;
   }
   forceCaptionsOff(player);
-  const playerState = playerPlaybackState(player);
-  if (state.autoplaySoundRestored || shouldRestoreAutoplaySound(videoId)) {
-    restorePlayerAudio(player, videoId);
-    return;
-  }
-  if (playerState !== window.YT?.PlayerState?.PLAYING) {
-    if (shouldStartAutoplayWithSound(videoId) && state.autoplayRecoveryAttempts < AUTOPLAY_MAX_SOUND_ATTEMPTS) {
-      state.autoplayRecoveryAttempts += 1;
-      playWithSound(player);
-    } else {
-      state.autoplayMutedFallback = true;
-      playMuted(player);
-    }
-    return;
-  }
-  restorePlayerAudio(player, videoId);
-}
-
-function restorePlayerAudio(player, videoId) {
-  if (!autoplayRecoveryActive(videoId)
-    || state.player !== player
-    || state.playerVideoId !== videoId
-    || state.activeVideoId !== videoId) {
+  if (!autoplayRecoveryActive(videoId)) {
     return;
   }
   if (playerPlaybackState(player) !== window.YT?.PlayerState?.PLAYING) {
-    state.autoplayMutedFallback = true;
     playMuted(player);
-    window.setTimeout(() => restorePlayerAudio(player, videoId), 900);
     return;
   }
-  state.autoplaySoundRestored = true;
-  playWithSound(player);
-  window.setTimeout(() => resumeAutoplayIfPaused(player, videoId), 220);
-  window.setTimeout(() => resumeAutoplayIfPaused(player, videoId), 760);
-  settleAutoplayRecovery(player, videoId);
-}
-
-function resumeAutoplayIfPaused(player, videoId) {
-  if (!autoplayRecoveryActive(videoId)
-    || state.player !== player
-    || state.playerVideoId !== videoId
-    || state.activeVideoId !== videoId) {
-    return;
-  }
-
-  const playerState = playerPlaybackState(player);
-  if (playerState === window.YT?.PlayerState?.PLAYING) {
-    settleAutoplayRecovery(player, videoId);
-    return;
-  }
-  if (state.autoplayRecoveryAttempts >= AUTOPLAY_MAX_SOUND_ATTEMPTS) {
-    state.autoplayMutedFallback = true;
-    playMuted(player);
-    window.setTimeout(() => settleAutoplayRecovery(player, videoId), 700);
-    return;
-  }
-  state.autoplayRecoveryAttempts += 1;
-  forceCaptionsOff(player);
-  playWithSound(player);
-  window.setTimeout(() => resumeAutoplayIfPaused(player, videoId), 450);
+  state.autoplayHasStarted = true;
+  settleAutoplayStart(player, videoId);
 }
 
 function ensureAutoplayStarted(player, videoId) {
@@ -4897,10 +4800,9 @@ function ensureAutoplayStarted(player, videoId) {
     return;
   }
   if (playerPlaybackState(player) === window.YT?.PlayerState?.PLAYING) {
-    settleAutoplayRecovery(player, videoId);
+    settleAutoplayStart(player, videoId);
     return;
   }
-  state.autoplayMutedFallback = true;
   playMuted(player);
   window.setTimeout(() => {
     if (playerPlaybackState(player) === window.YT?.PlayerState?.PLAYING) {
@@ -4976,9 +4878,11 @@ function destroyPlayer() {
   updateProgressFromPlayer({ save: true });
   stopProgressSync();
   const player = state.player;
+  const videoId = state.playerVideoId;
   state.player = null;
   state.playerVideoId = "";
   state.playerReady = false;
+  clearAutoplayRecovery(videoId);
 
   if (!player) {
     return;
