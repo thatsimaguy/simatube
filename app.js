@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-autoplay-sound-v3";
+const CACHE_CLEANUP_VERSION = "2026-07-autoplay-sound-v4";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -3643,7 +3643,7 @@ function render() {
   const retainedPlayerShell = takeReusablePlayerShell();
   if (!retainedPlayerShell) {
     const keptWarmPlayer = state.player && !state.playerError && (state.playerReady || state.playerWarmOnly)
-      ? parkPlayerForReuse({ pause: state.view !== "watch" })
+      ? parkPlayerForReuse({ pause: true })
       : false;
     if (!keptWarmPlayer) {
       destroyPlayer();
@@ -4688,27 +4688,27 @@ function attachWarmPlayerToWatch(options = {}) {
     return false;
   }
 
+  const autoplay = Boolean(options.autoplay);
+  const startSeconds = resumeStartSeconds(video);
+  const needsLoad = state.playerVideoId !== video.id;
+  if (needsLoad) {
+    destroyPlayer();
+    return false;
+  }
+
   mount.replaceChildren(iframe);
   state.playerWarmOnly = false;
   configurePlayerIframe();
   forceCaptionsOff(player);
-
-  const autoplay = Boolean(options.autoplay);
-  const startSeconds = resumeStartSeconds(video);
-  const needsLoad = state.playerVideoId !== video.id;
   state.playerVideoId = video.id;
 
   try {
     if (autoplay) {
-      if (needsLoad) {
-        player.loadVideoById?.({ videoId: video.id, startSeconds });
-      } else if (startSeconds > 1) {
+      if (startSeconds > 1) {
         player.seekTo?.(startSeconds, true);
       }
       state.pendingAutoplayVideoId = "";
       startAutoplayPlayback(player, video.id);
-    } else if (needsLoad) {
-      player.cueVideoById?.({ videoId: video.id, startSeconds });
     }
   } catch {
     destroyPlayer();
