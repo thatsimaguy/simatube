@@ -1076,6 +1076,57 @@ label:focus-visible {
   margin: 6px 12px 12px;
 }
 
+.search-discovery {
+  padding: 8px 0 4px;
+}
+
+.search-section-head {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.search-section-head h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 20px;
+}
+
+.recent-searches {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 12px 12px;
+  scrollbar-width: none;
+}
+
+.recent-searches::-webkit-scrollbar {
+  display: none;
+}
+
+.recent-searches .chip {
+  max-width: 210px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.recent-searches .chip svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.recent-searches .chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .quick-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1652,6 +1703,21 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
   font-size: 11px;
 }
 
+.comment-skeleton div {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  padding-top: 3px;
+}
+
+.comment-skeleton .skeleton-line {
+  width: 58%;
+}
+
+.comment-skeleton .skeleton-line.wide {
+  width: min(82%, 250px);
+}
+
 .queue-section {
   display: block;
   margin-top: 4px;
@@ -1842,6 +1908,38 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen .poster-butt
 
 .channel-actions {
   gap: 8px;
+}
+
+.inline-state {
+  display: grid;
+  gap: 4px;
+  margin: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, .035);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.inline-state strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.inline-state.error {
+  border-color: rgba(255, 68, 102, .24);
+  background: rgba(255, 0, 51, .055);
+}
+
+.inline-state .text-button {
+  justify-self: start;
+  margin: 4px 0 -4px -10px;
+}
+
+.comments-block .inline-state {
+  margin: 12px 0 0;
 }
 
 .channel-tabs {

@@ -23,6 +23,10 @@ const VIDEO_ROWS_INCREMENT = 10;
 const MAX_VIDEO_CACHE_ENTRIES = 240;
 const MAX_CHANNEL_CACHE_ENTRIES = 120;
 const MAX_CHANNEL_VIDEO_CACHES = 12;
+const MAX_SEARCH_CACHE_ENTRIES = 8;
+const MAX_COMMENTS_CACHE_ENTRIES = 6;
+const MAX_SAVED_VIDEOS = 50;
+const LIBRARY_INITIAL_VIDEO_ROWS = 6;
 const INITIAL_SUBSCRIPTION_CHANNELS = 10;
 const SUBSCRIPTION_CHANNEL_INCREMENT = 10;
 
@@ -105,6 +109,13 @@ const recoveringFromFastReload = beginBootGuard();
 let googleIdentityLoadPromise = null;
 let serverSessionRefreshPromise = null;
 let pendingRenderFocus = null;
+const storedSavedVideos = readArray("yt_saved_videos")
+  .map(compactStoredVideo)
+  .filter((video) => video?.id)
+  .slice(0, MAX_SAVED_VIDEOS);
+const storedSavedIds = readArray("yt_saved_ids")
+  .filter((id) => typeof id === "string")
+  .slice(0, MAX_SAVED_VIDEOS);
 
 const state = {
   view: recoveringFromFastReload ? "home" : sanitizeView(readJson("yt_last_view", "home")),
@@ -123,7 +134,13 @@ const state = {
   subscriptionWarning: "",
   queue: [],
   comments: [],
+  commentsByVideoId: {},
+  commentsStatusByVideoId: {},
+  commentsErrorByVideoId: {},
+  commentsAbortController: null,
+  commentsLoadingVideoId: "",
   likedVideos: [],
+  likedVideosLoaded: false,
   ratings: {},
   subscriptionIdsByChannel: {},
   channelThumbnailsById: {},
@@ -138,11 +155,14 @@ const state = {
   channelLoading: false,
   channelLoadingId: "",
   channelLoadVersion: 0,
+  channelAbortController: null,
+  channelLoadedIds: new Set(),
   channelSort: "latest",
-  recentChannels: readArray("yt_recent_channels").map(compactStoredChannel).filter((channel) => channel?.id),
-  savedIds: new Set(readArray("yt_saved_ids").filter((id) => typeof id === "string")),
-  localHistory: readArray("yt_history").map(compactStoredVideo).filter((video) => video?.id),
-  searchHistory: readArray("yt_search_history").filter((query) => typeof query === "string"),
+  recentChannels: readArray("yt_recent_channels").map(compactStoredChannel).filter((channel) => channel?.id).slice(0, 12),
+  savedIds: new Set([...storedSavedIds, ...storedSavedVideos.map((video) => video.id)]),
+  savedVideos: storedSavedVideos,
+  localHistory: readArray("yt_history").map(compactStoredVideo).filter((video) => video?.id).slice(0, 30),
+  searchHistory: readArray("yt_search_history").filter((query) => typeof query === "string").slice(0, 20),
   onboarded: readBoolean("yt_onboarded", false),
   fullscreenControlsTimer: 0,
   fullscreenControlsHidden: false,
@@ -165,6 +185,9 @@ const state = {
   error: "",
   query: "",
   searchLoadVersion: 0,
+  searchStatus: "idle",
+  searchCacheByQuery: Object.create(null),
+  searchAbortController: null,
   commentsLoadVersion: 0,
   authVersion: 0,
   homeFilter: "all",
@@ -177,7 +200,7 @@ const state = {
   playerApiLoadTimer: 0,
 };
 
-cacheVideos(state.localHistory);
+cacheVideos([...state.localHistory, ...state.savedVideos]);
 
 await loadOptionalLocalConfig();
 state.config = normalizeConfig(window.YT_APP_CONFIG || {});
@@ -320,8 +343,12 @@ async function restoreServerSession() {
     return false;
   }
 
+  const authVersion = state.authVersion;
   try {
     const session = await fetchServerSession();
+    if (authVersion !== state.authVersion) {
+      return false;
+    }
     if (!session.authenticated) {
       if (["error", "invalid", "failed"].includes(state.authResult)) {
         showToast("Sign-in did not finish. Try again.");
@@ -335,7 +362,9 @@ async function restoreServerSession() {
     }
 
     applyServerSession(session);
-    await loadMe();
+    if (!await loadMe(authVersion)) {
+      return false;
+    }
     const cacheStatus = restorePersonalCache(state.auth.profile.id);
     state.onboarded = true;
     state.demoMode = false;
@@ -354,6 +383,9 @@ async function restoreServerSession() {
     state.authResult = "";
     return true;
   } catch {
+    if (authVersion !== state.authVersion) {
+      return false;
+    }
     if (navigator.onLine === false) {
       const cachedFeed = cachedOfflineHomeFeed();
       state.feedLoading = false;
@@ -605,6 +637,7 @@ function restorePersonalCache(profileId) {
   state.homeFeed = homeFeed.length ? homeFeed : subscriptionVideos.slice(0, 40);
   state.queue = state.homeFeed;
   state.likedVideos = likedVideos;
+  state.likedVideosLoaded = cached.likedVideosLoaded === true || likedVideos.length > 0;
   state.subscriptionIdsByChannel = stringRecord(cached.subscriptionIdsByChannel);
   state.feedReasonsById = stringRecord(cached.feedReasonsById);
   state.subscriptionsLoaded = Boolean(subscriptionsUsable && cached.subscriptionsLoaded);
@@ -649,6 +682,7 @@ function savePersonalCache(options = {}) {
     },
     subscriptionsLoaded: state.subscriptionsLoaded,
     homeFeedLoaded: state.homeFeedLoaded,
+    likedVideosLoaded: state.likedVideosLoaded,
     subscriptions: state.subscriptions.slice(0, 50).map(compactStoredChannel),
     subscriptionVideos: state.subscriptionVideos.slice(0, MAX_SUBSCRIPTION_VIDEO_ROWS).map(compactStoredVideo),
     homeFeed,
@@ -975,6 +1009,11 @@ async function youtubeFetch(path, params = {}, options = {}) {
     });
   } catch (error) {
     if (error?.name === "AbortError") {
+      if (options.signal?.aborted) {
+        const cancelled = new Error("Request cancelled.");
+        cancelled.name = "AbortError";
+        throw cancelled;
+      }
       throw new Error("YouTube took too long to respond. Try again.");
     }
     throw error;
@@ -1059,10 +1098,17 @@ async function signIn() {
     return;
   }
 
+  const authVersion = state.authVersion;
   setLoading("Signing in");
   try {
     await ensureReadAuth({ prompt: state.rememberSignIn ? "" : "consent" });
-    await loadMe();
+    if (!await loadMe(authVersion)) {
+      return;
+    }
+    state.searchCacheByQuery = Object.create(null);
+    state.searchResults = [];
+    state.searchStatus = "idle";
+    state.query = "";
     const cacheStatus = restorePersonalCache(state.auth.profile.id);
     if (!cacheStatus.subscriptionsFresh) {
       await loadSubscriptionsAndFeed({
@@ -1096,6 +1142,9 @@ async function signIn() {
 
 async function signOut() {
   cancelPendingPlayerApiLoad();
+  cancelSearchRequest();
+  cancelCommentsRequest();
+  cancelChannelRequest();
   clearPersonalCache();
   state.authVersion += 1;
   state.searchLoadVersion += 1;
@@ -1110,6 +1159,15 @@ async function signOut() {
   state.subscriptionWarning = "";
   state.subscriptionIdsByChannel = {};
   state.likedVideos = [];
+  state.likedVideosLoaded = false;
+  state.searchCacheByQuery = Object.create(null);
+  state.searchResults = [];
+  state.searchStatus = "idle";
+  state.query = "";
+  state.comments = [];
+  state.commentsByVideoId = {};
+  state.commentsStatusByVideoId = {};
+  state.commentsErrorByVideoId = {};
   state.channelLoading = false;
   state.channelLoadingId = "";
   state.subscriptionsLoaded = false;
@@ -1136,12 +1194,36 @@ async function signOut() {
 
 function continueDemo() {
   clearPersonalCache();
+  cancelSearchRequest();
+  cancelCommentsRequest();
+  cancelChannelRequest();
+  state.authVersion += 1;
+  state.searchLoadVersion += 1;
+  state.commentsLoadVersion += 1;
+  state.channelLoadVersion += 1;
+  state.auth.accessToken = "";
+  state.auth.scopes.clear();
+  state.auth.profile = null;
+  state.subscriptions = [];
+  state.subscriptionVideos = [];
+  state.subscriptionIdsByChannel = {};
+  state.subscriptionsLoaded = false;
+  state.subscriptionLoadPromise = null;
+  state.homeFeedLoaded = false;
+  state.homeFeedLoadPromise = null;
+  state.homeFeedLoadScheduled = false;
   state.onboarded = true;
   state.demoMode = true;
   state.rememberSignIn = false;
   state.reconnectFailed = false;
   state.feedLoading = false;
   state.usingCachedPersonalFeed = false;
+  state.likedVideos = [];
+  state.likedVideosLoaded = false;
+  state.searchCacheByQuery = Object.create(null);
+  state.searchResults = [];
+  state.searchStatus = "idle";
+  state.query = "";
   state.homeFeed = demoVideos;
   state.queue = demoVideos;
   state.view = "home";
@@ -1157,12 +1239,15 @@ function continueDemo() {
 }
 
 async function restoreSignIn() {
+  const authVersion = state.authVersion;
   state.feedLoading = true;
   setLoading("Reconnecting SimaTube");
 
   try {
     await ensureReadAuth({ prompt: "", quiet: true, timeoutMs: 7000 });
-    await loadMe();
+    if (!await loadMe(authVersion)) {
+      return;
+    }
     const cacheStatus = restorePersonalCache(state.auth.profile.id);
     if (!cacheStatus.subscriptionsFresh) {
       await loadSubscriptionsAndFeed({
@@ -1201,13 +1286,16 @@ async function restoreSignIn() {
   }
 }
 
-async function loadMe() {
+async function loadMe(expectedAuthVersion = state.authVersion) {
   const payload = await youtubeFetch("/channels", {
     part: "snippet,contentDetails",
     mine: "true",
   }, { auth: true });
 
   const channel = payload.items?.[0];
+  if (expectedAuthVersion !== state.authVersion) {
+    return false;
+  }
   if (!channel) {
     throw new Error("No YouTube channel was found for this account.");
   }
@@ -1218,6 +1306,7 @@ async function loadMe() {
     thumbnailUrl: avatarThumbnail(channel.snippet?.thumbnails),
     likedPlaylistId: channel.contentDetails?.relatedPlaylists?.likes || "",
   };
+  return true;
 }
 
 function loadSubscriptionsAndFeed(options = {}) {
@@ -1446,7 +1535,7 @@ function loadPersonalHomeFeed(options = {}) {
   }
 
   const authVersion = state.authVersion;
-  const request = buildPersonalHomeFeed(state.subscriptionVideos)
+  const request = buildPersonalHomeFeed(state.subscriptionVideos, options)
     .then((feed) => {
       if (authVersion !== state.authVersion) {
         return false;
@@ -1476,11 +1565,9 @@ function loadPersonalHomeFeed(options = {}) {
   return request;
 }
 
-async function buildPersonalHomeFeed(subscribedVideos = []) {
-  const likedVideos = await loadLikedVideoSeeds();
-  if (likedVideos.length) {
-    state.likedVideos = likedVideos;
-  }
+async function buildPersonalHomeFeed(subscribedVideos = [], options = {}) {
+  const likedVideos = await loadLikedVideoSeeds(options);
+  state.likedVideos = likedVideos;
 
   const [discoveryResult, popularResult] = await Promise.allSettled([
     loadInterestDiscoveryVideos(),
@@ -1498,7 +1585,10 @@ async function buildPersonalHomeFeed(subscribedVideos = []) {
   return rankHomeCandidates(candidates);
 }
 
-async function loadLikedVideoSeeds() {
+async function loadLikedVideoSeeds(options = {}) {
+  if (state.likedVideosLoaded && !options.refresh) {
+    return state.likedVideos;
+  }
   try {
     const payload = await youtubeFetch("/videos", {
       part: "snippet,contentDetails,statistics",
@@ -1506,9 +1596,12 @@ async function loadLikedVideoSeeds() {
       maxResults: 25,
     }, { auth: true });
     const videos = (payload.items || []).map(normalizeVideoResource);
-    return hydrateVideoChannelThumbnails(videos);
+    const hydrated = await hydrateVideoChannelThumbnails(videos, { auth: true });
+    state.likedVideos = hydrated;
+    state.likedVideosLoaded = true;
+    return hydrated;
   } catch {
-    return [];
+    return state.likedVideos;
   }
 }
 
@@ -1730,7 +1823,7 @@ function stableDailyJitter(id = "") {
   return (hash % 1000) / 100;
 }
 
-async function loadChannels(channelIds) {
+async function loadChannels(channelIds, options = {}) {
   const chunks = chunk([...new Set(channelIds.filter(Boolean))], 50);
   if (!chunks.length) {
     return [];
@@ -1740,7 +1833,10 @@ async function loadChannels(channelIds) {
     part: "snippet,contentDetails,statistics",
     id: ids.join(","),
     maxResults: 50,
-  }, { auth: Boolean(state.auth.accessToken) })));
+  }, {
+    ...options,
+    auth: options.auth ?? Boolean(state.auth.accessToken),
+  })));
   const fulfilled = responses
     .filter((result) => result.status === "fulfilled")
     .map((result) => result.value);
@@ -1780,7 +1876,7 @@ async function loadVideoDetails(videoIds, options = {}) {
   }
 
   const videos = fulfilled.flatMap((payload) => payload.items || []).map(normalizeVideoResource);
-  const hydrated = await hydrateVideoChannelThumbnails(videos);
+  const hydrated = await hydrateVideoChannelThumbnails(videos, options);
   cacheVideos(hydrated);
   return uniqueIds.map((id) => state.videoCacheById[id]).filter(Boolean);
 }
@@ -1800,7 +1896,7 @@ async function loadChannelById(channelId, options = {}) {
     return cached || channelFromVideo(findVideoByChannel(channelId));
   }
 
-  const [channel] = await loadChannels([channelId]);
+  const [channel] = await loadChannels([channelId], options);
   return channel || cached || channelFromVideo(findVideoByChannel(channelId));
 }
 
@@ -1809,7 +1905,9 @@ async function loadChannelVideos(channelId, options = {}) {
     return [];
   }
 
-  if (state.channelVideosById[channelId]?.length && !options.refresh) {
+  if (state.channelVideosById[channelId]?.length
+    && !options.refresh
+    && (state.channelLoadedIds.has(channelId) || !hasApiAccess())) {
     return state.channelVideosById[channelId];
   }
 
@@ -1826,7 +1924,10 @@ async function loadChannelVideos(channelId, options = {}) {
     part: "snippet,contentDetails",
     playlistId: channel.uploadsPlaylistId,
     maxResults: 30,
-  }, { auth: Boolean(state.auth.accessToken) });
+  }, {
+    auth: Boolean(state.auth.accessToken),
+    signal: options.signal,
+  });
 
   const ids = [...new Set((payload.items || [])
     .map((item) => item.contentDetails?.videoId)
@@ -1834,80 +1935,154 @@ async function loadChannelVideos(channelId, options = {}) {
   const videos = (await loadVideoDetails(ids, {
     auth: Boolean(state.auth.accessToken),
     refresh: options.refresh,
+    signal: options.signal,
   }))
     .filter((video) => !isLikelyShort(video));
   state.channelVideosById[channelId] = videos;
   pruneRecord(state.channelVideosById, MAX_CHANNEL_VIDEO_CACHES, new Set([channelId]));
+  [...state.channelLoadedIds].forEach((loadedId) => {
+    if (!Object.prototype.hasOwnProperty.call(state.channelVideosById, loadedId)) {
+      state.channelLoadedIds.delete(loadedId);
+    }
+  });
   return videos;
+}
+
+function cancelChannelRequest() {
+  state.channelAbortController?.abort();
+  state.channelAbortController = null;
 }
 
 async function loadActiveChannel(options = {}) {
   const channelId = state.activeChannelId;
   if (!channelId) {
-    return;
+    return false;
+  }
+  if (state.channelLoadedIds.has(channelId) && !options.refresh) {
+    state.error = "";
+    return true;
   }
   if (state.channelLoading && state.channelLoadingId === channelId) {
-    return;
+    return false;
   }
 
+  cancelChannelRequest();
+  const controller = "AbortController" in window ? new AbortController() : null;
   const loadVersion = ++state.channelLoadVersion;
+  const hasVideos = Boolean(state.channelVideosById[channelId]?.length);
+  state.channelAbortController = controller;
   state.channelLoading = true;
   state.channelLoadingId = channelId;
-  setLoading("Loading channel");
+  state.error = "";
+  if (!hasVideos) {
+    state.loading = "Loading channel";
+    render();
+  }
+
   try {
-    const channel = await loadChannelById(channelId, options);
+    const requestOptions = { ...options, signal: controller?.signal };
+    const channel = await loadChannelById(channelId, requestOptions);
     if (loadVersion !== state.channelLoadVersion || channelId !== state.activeChannelId) {
-      return;
+      return false;
     }
     rememberChannel(channel);
-    await loadChannelVideos(channelId, options);
+    await loadChannelVideos(channelId, requestOptions);
     if (loadVersion !== state.channelLoadVersion || channelId !== state.activeChannelId) {
-      return;
+      return false;
     }
+    state.channelLoadedIds.add(channelId);
     state.error = "";
+    return true;
   } catch (error) {
-    if (loadVersion !== state.channelLoadVersion) {
-      return;
+    if (loadVersion !== state.channelLoadVersion || error?.name === "AbortError") {
+      return false;
     }
     state.error = error.message;
     if (!options.quiet) {
-      openSheet("Could not load channel", error.message, [{ label: "Close", action: closeSheet }]);
+      showToast("Channel could not refresh.");
     }
+    return false;
   } finally {
     if (loadVersion === state.channelLoadVersion) {
       state.channelLoading = false;
       state.channelLoadingId = "";
-      clearLoading();
+      if (state.channelAbortController === controller) {
+        state.channelAbortController = null;
+      }
+      if (state.loading === "Loading channel") {
+        state.loading = "";
+      }
+      if (state.view === "channel") {
+        render();
+      }
     }
   }
 }
 
-async function runSearch(query) {
-  const cleaned = query.trim();
+function cancelSearchRequest() {
+  state.searchAbortController?.abort();
+  state.searchAbortController = null;
+  if (state.searchStatus === "loading") {
+    state.searchStatus = state.searchResults.length ? "loaded" : "idle";
+  }
+  if (state.loading === "Searching") {
+    state.loading = "";
+  }
+}
+
+function cacheSearchResults(queryKey, videos) {
+  delete state.searchCacheByQuery[queryKey];
+  state.searchCacheByQuery[queryKey] = videos;
+  pruneRecord(state.searchCacheByQuery, MAX_SEARCH_CACHE_ENTRIES);
+}
+
+async function runSearch(query, options = {}) {
+  const cleaned = String(query || "").trim();
   const loadVersion = ++state.searchLoadVersion;
+  cancelSearchRequest();
   state.query = cleaned;
+  state.error = "";
 
   if (!cleaned) {
     state.searchResults = [];
+    state.searchStatus = "idle";
     render();
-    return;
+    return false;
   }
 
   rememberSearch(cleaned);
-  setLoading("Searching");
-  try {
-    if (!hasApiAccess()) {
-      state.searchResults = demoVideos.filter((video) => {
-        const haystack = `${video.title} ${video.channelTitle}`.toLowerCase();
-        return haystack.includes(cleaned.toLowerCase());
-      });
-      if (!state.searchResults.length) {
-        state.searchResults = demoVideos;
-      }
-      state.error = "";
-      return;
-    }
+  const queryKey = cleaned.toLowerCase();
+  const cached = state.searchCacheByQuery[queryKey];
+  if (cached && !options.refresh) {
+    state.searchResults = cached;
+    state.searchStatus = "loaded";
+    render();
+    return true;
+  }
 
+  if (!hasApiAccess()) {
+    state.searchResults = demoVideos.filter((video) => {
+      const haystack = `${video.title} ${video.channelTitle}`.toLowerCase();
+      return haystack.includes(queryKey);
+    });
+    state.searchStatus = "loaded";
+    cacheSearchResults(queryKey, state.searchResults);
+    render();
+    return true;
+  }
+
+  const controller = "AbortController" in window ? new AbortController() : null;
+  state.searchAbortController = controller;
+  state.searchResults = [];
+  state.searchStatus = "loading";
+  state.loading = "Searching";
+  render();
+
+  try {
+    const requestOptions = {
+      auth: Boolean(state.auth.accessToken),
+      signal: controller?.signal,
+    };
     const search = await youtubeFetch("/search", {
       part: "snippet",
       q: cleaned,
@@ -1915,25 +2090,35 @@ async function runSearch(query) {
       videoEmbeddable: "true",
       maxResults: 25,
       regionCode: state.config.regionCode,
-    }, { auth: Boolean(state.auth.accessToken) });
+    }, requestOptions);
 
     const ids = (search.items || []).map((item) => item.id?.videoId).filter(Boolean);
-    const results = await loadVideoDetails(ids, { auth: Boolean(state.auth.accessToken) });
+    const results = await loadVideoDetails(ids, requestOptions);
     if (loadVersion !== state.searchLoadVersion) {
-      return;
+      return false;
     }
-    state.searchResults = results
-      .filter((video) => !isLikelyShort(video));
-    state.error = "";
+    state.searchResults = results.filter((video) => !isLikelyShort(video));
+    state.searchStatus = "loaded";
+    cacheSearchResults(queryKey, state.searchResults);
+    return true;
   } catch (error) {
-    if (loadVersion !== state.searchLoadVersion) {
-      return;
+    if (loadVersion !== state.searchLoadVersion || error?.name === "AbortError") {
+      return false;
     }
+    state.searchStatus = "error";
     state.error = error.message;
-    openSheet("Search failed", error.message, [{ label: "Close", action: closeSheet }]);
+    return false;
   } finally {
     if (loadVersion === state.searchLoadVersion) {
-      clearLoading();
+      if (state.searchAbortController === controller) {
+        state.searchAbortController = null;
+      }
+      if (state.loading === "Searching") {
+        state.loading = "";
+      }
+      if (state.view === "search") {
+        render();
+      }
     }
   }
 }
@@ -1958,13 +2143,49 @@ function finishPendingAction(key) {
   state.pendingActions.delete(key);
 }
 
+function cancelCommentsRequest() {
+  state.commentsAbortController?.abort();
+  state.commentsAbortController = null;
+  if (state.commentsLoadingVideoId) {
+    if (state.commentsStatusByVideoId[state.commentsLoadingVideoId] === "loading") {
+      state.commentsStatusByVideoId[state.commentsLoadingVideoId] = "idle";
+    }
+    state.pendingActions.delete(`comments:${state.commentsLoadingVideoId}`);
+  }
+  state.commentsLoadingVideoId = "";
+}
+
+function pruneCommentsCache() {
+  const keys = Object.keys(state.commentsStatusByVideoId);
+  let removeCount = Math.max(0, keys.length - MAX_COMMENTS_CACHE_ENTRIES);
+  for (const key of keys) {
+    if (!removeCount) {
+      break;
+    }
+    if (key === state.activeVideoId) {
+      continue;
+    }
+    delete state.commentsByVideoId[key];
+    delete state.commentsStatusByVideoId[key];
+    delete state.commentsErrorByVideoId[key];
+    removeCount -= 1;
+  }
+}
+
 async function loadComments(videoId) {
+  cancelCommentsRequest();
   const actionKey = `comments:${videoId}`;
   if (!beginPendingAction(actionKey)) {
-    return;
+    return false;
   }
   const loadVersion = ++state.commentsLoadVersion;
-  setLoading("Loading comments");
+  const controller = "AbortController" in window ? new AbortController() : null;
+  state.commentsAbortController = controller;
+  state.commentsLoadingVideoId = videoId;
+  state.commentsStatusByVideoId[videoId] = "loading";
+  state.commentsErrorByVideoId[videoId] = "";
+  render();
+
   try {
     const payload = await youtubeFetch("/commentThreads", {
       part: "snippet",
@@ -1972,41 +2193,64 @@ async function loadComments(videoId) {
       maxResults: 10,
       order: "relevance",
       textFormat: "plainText",
-    }, { auth: Boolean(state.auth.accessToken) });
+    }, {
+      auth: Boolean(state.auth.accessToken),
+      signal: controller?.signal,
+    });
 
     const comments = (payload.items || []).map((item) => {
       const comment = item.snippet?.topLevelComment?.snippet || {};
       return {
         author: comment.authorDisplayName || "YouTube user",
-        avatar: comment.authorProfileImageUrl || "",
+        avatar: compactAvatarUrl(comment.authorProfileImageUrl || ""),
         text: comment.textDisplay || "",
-        likes: comment.likeCount || 0,
+        likes: Number(comment.likeCount || 0),
       };
     });
     if (loadVersion !== state.commentsLoadVersion || videoId !== state.activeVideoId) {
-      return;
+      return false;
     }
+    state.commentsByVideoId[videoId] = comments;
+    state.commentsStatusByVideoId[videoId] = "loaded";
     state.comments = comments;
+    pruneCommentsCache();
+    return true;
   } catch (error) {
-    if (loadVersion !== state.commentsLoadVersion) {
-      return;
+    if (loadVersion !== state.commentsLoadVersion || error?.name === "AbortError") {
+      return false;
     }
-    openSheet("Comments unavailable", error.message, [{ label: "Close", action: closeSheet }]);
+    state.commentsStatusByVideoId[videoId] = "error";
+    state.commentsErrorByVideoId[videoId] = error.message;
+    state.comments = state.commentsByVideoId[videoId] || [];
+    pruneCommentsCache();
+    return false;
   } finally {
     finishPendingAction(actionKey);
     if (loadVersion === state.commentsLoadVersion) {
-      clearLoading();
+      if (state.commentsAbortController === controller) {
+        state.commentsAbortController = null;
+      }
+      state.commentsLoadingVideoId = "";
+      if (state.view === "watch" && videoId === state.activeVideoId) {
+        render();
+      }
     }
   }
 }
 
-async function loadLikedVideos() {
+async function loadLikedVideos(options = {}) {
+  if (!state.auth.profile) {
+    return false;
+  }
+  if (state.likedVideosLoaded && !options.refresh) {
+    return true;
+  }
   const actionKey = "liked-videos";
   if (!beginPendingAction(actionKey)) {
-    return;
+    return false;
   }
   const authVersion = state.authVersion;
-  setLoading("Loading liked videos");
+  render();
   try {
     await ensureReadAuth();
     const payload = await youtubeFetch("/videos", {
@@ -2018,19 +2262,22 @@ async function loadLikedVideos() {
       .map(normalizeVideoResource)))
       .filter((video) => !isLikelyShort(video));
     if (authVersion !== state.authVersion) {
-      return;
+      return false;
     }
     state.likedVideos = likedVideos;
+    state.likedVideosLoaded = true;
     savePersonalCache();
+    return true;
   } catch (error) {
     if (authVersion !== state.authVersion) {
-      return;
+      return false;
     }
     openSheet("Liked videos unavailable", error.message, [{ label: "Close", action: closeSheet }]);
+    return false;
   } finally {
     finishPendingAction(actionKey);
     if (authVersion === state.authVersion) {
-      clearLoading();
+      render();
     }
   }
 }
@@ -2226,7 +2473,7 @@ function cacheVideos(videos = []) {
   pruneRecord(
     state.videoCacheById,
     MAX_VIDEO_CACHE_ENTRIES,
-    new Set([state.activeVideoId, ...demoVideos.map((video) => video.id)].filter(Boolean)),
+    new Set([state.activeVideoId, ...state.savedIds, ...demoVideos.map((video) => video.id)].filter(Boolean)),
   );
 }
 
@@ -2245,14 +2492,14 @@ function pruneRecord(record, maxEntries, protectedKeys = new Set()) {
   }
 }
 
-async function hydrateVideoChannelThumbnails(videos = []) {
+async function hydrateVideoChannelThumbnails(videos = [], options = {}) {
   const missingChannelIds = [...new Set(videos
     .map((video) => video.channelId)
     .filter((channelId) => channelId && !state.channelThumbnailsById[channelId]))];
 
   if (missingChannelIds.length) {
     try {
-      await loadChannels(missingChannelIds);
+      await loadChannels(missingChannelIds, options);
     } catch {
       // Channel avatars are nice-to-have; keep the video list usable if this fails.
     }
@@ -2451,6 +2698,7 @@ function findVideo(videoId) {
     ...state.searchResults,
     ...state.queue,
     ...state.localHistory,
+    ...state.savedVideos,
     ...state.likedVideos,
     ...state.subscriptionVideos,
     ...Object.values(state.channelVideosById).flat(),
@@ -2464,6 +2712,7 @@ function findVideoByChannel(channelId) {
     ...state.searchResults,
     ...state.queue,
     ...state.localHistory,
+    ...state.savedVideos,
     ...state.likedVideos,
     ...state.subscriptionVideos,
     ...Object.values(state.channelVideosById).flat(),
@@ -2579,7 +2828,8 @@ function openWatch(videoId, queue = [], options = {}) {
   state.activeVideoId = videoId;
   state.queue = queue.length ? queue : state.homeFeed;
   state.commentsLoadVersion += 1;
-  state.comments = [];
+  cancelCommentsRequest();
+  state.comments = state.commentsByVideoId[videoId] || [];
   state.playerError = null;
   state.view = "watch";
   writeJson("yt_active_video_id", videoId);
@@ -2606,10 +2856,17 @@ function openChannel(channelId, options = {}) {
   }
 
   const changed = state.view !== "channel" || state.activeChannelId !== channelId;
+  if (changed) {
+    state.channelLoadVersion += 1;
+    cancelChannelRequest();
+    state.channelLoading = false;
+    state.channelLoadingId = "";
+  }
   cancelPendingPlayerApiLoad();
   closePlayerFullscreen();
   state.activeChannelId = channelId;
   state.channelSort = "latest";
+  state.error = "";
   state.view = "channel";
   writeJson("yt_active_channel_id", channelId);
   writeJson("yt_last_view", "channel");
@@ -2619,29 +2876,68 @@ function openChannel(channelId, options = {}) {
   }
   render();
   resetScroll();
-  loadActiveChannel({ quiet: true });
+  if (!state.channelLoadedIds.has(channelId)) {
+    loadActiveChannel({ quiet: true });
+  }
 }
 
 function addHistory(video) {
-  cacheVideos([video]);
+  const compact = compactStoredVideo(video);
+  cacheVideos([compact]);
   state.localHistory = [
-    video,
-    ...state.localHistory.filter((item) => item.id !== video.id),
+    compact,
+    ...state.localHistory.filter((item) => item.id !== compact.id),
   ].slice(0, 30);
   writeJson("yt_history", state.localHistory);
-  rememberChannel(channelFromVideo(video));
+  if (state.savedIds.has(compact.id)) {
+    state.savedVideos = [
+      compact,
+      ...state.savedVideos.filter((item) => item.id !== compact.id),
+    ].slice(0, MAX_SAVED_VIDEOS);
+    writeJson("yt_saved_videos", state.savedVideos);
+  }
+  rememberChannel(channelFromVideo(compact));
+}
+
+function savedLibraryVideos() {
+  const videos = [];
+  const seen = new Set();
+  const add = (video) => {
+    if (!video?.id || !state.savedIds.has(video.id) || seen.has(video.id)) {
+      return;
+    }
+    videos.push(compactStoredVideo(video));
+    seen.add(video.id);
+  };
+  state.savedVideos.forEach((video) => add(state.videoCacheById[video.id] || video));
+  [...state.savedIds].forEach((videoId) => add(findVideo(videoId)));
+  return videos.slice(0, MAX_SAVED_VIDEOS);
+}
+
+function persistSavedLibrary() {
+  state.savedVideos = savedLibraryVideos();
+  writeJson("yt_saved_ids", [...state.savedIds]);
+  writeJson("yt_saved_videos", state.savedVideos);
 }
 
 function toggleSaved(videoId) {
   if (state.savedIds.has(videoId)) {
     state.savedIds.delete(videoId);
+    state.savedVideos = state.savedVideos.filter((video) => video.id !== videoId);
     showToast("Removed from saved.");
   } else {
     state.savedIds.add(videoId);
+    const video = findVideo(videoId);
+    if (video) {
+      state.savedVideos = [
+        compactStoredVideo(video),
+        ...state.savedVideos.filter((item) => item.id !== videoId),
+      ].slice(0, MAX_SAVED_VIDEOS);
+    }
     showToast("Saved.");
   }
 
-  writeJson("yt_saved_ids", [...state.savedIds]);
+  persistSavedLibrary();
   render();
 }
 
@@ -2668,12 +2964,15 @@ function setView(view, options = {}) {
   const changed = state.view !== view;
   if (changed && state.view === "search") {
     state.searchLoadVersion += 1;
+    cancelSearchRequest();
   }
   if (changed && state.view === "watch") {
     state.commentsLoadVersion += 1;
+    cancelCommentsRequest();
   }
   if (changed && state.view === "channel") {
     state.channelLoadVersion += 1;
+    cancelChannelRequest();
     state.channelLoading = false;
     state.channelLoadingId = "";
   }
@@ -2709,7 +3008,7 @@ function setView(view, options = {}) {
   if (view === "subscriptions" && state.auth.accessToken && !state.subscriptionsLoaded) {
     loadSubscriptionsAndFeed({ includeHome: false });
   }
-  if (view === "channel" && state.activeChannelId && !state.channelVideosById[state.activeChannelId]?.length) {
+  if (view === "channel" && state.activeChannelId && !state.channelLoadedIds.has(state.activeChannelId)) {
     loadActiveChannel({ quiet: true });
   }
 }
@@ -2727,7 +3026,7 @@ function filteredHomeFeed() {
   }
 
   if (state.homeFilter === "saved") {
-    return state.homeFeed.filter((video) => state.savedIds.has(video.id));
+    return savedLibraryVideos();
   }
 
   if (state.homeFilter === "explore") {
@@ -3091,8 +3390,14 @@ function renderReconnectScreen() {
 
 function renderHome() {
   const feed = filteredHomeFeed();
-  const feedSource = state.homeFilter === "history" ? "history" : "home";
+  const feedSource = ["history", "saved"].includes(state.homeFilter) ? state.homeFilter : "home";
   const personalized = Boolean(state.auth.profile || state.usingCachedPersonalFeed);
+  const emptyMessage = {
+    today: "No new long-form videos today.",
+    explore: "No discovery picks are ready yet.",
+    saved: "Save a video to keep it here.",
+    history: "Videos you watch will appear here.",
+  }[state.homeFilter] || "No videos are ready yet.";
   return `
     <section class="home-rail">
       <h1 class="sr-only">Home</h1>
@@ -3105,7 +3410,7 @@ function renderHome() {
         ${filterChip("saved", "Saved")}
         ${filterChip("history", "History")}
       </div>
-      ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, feedSource)}
+      ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, feedSource, emptyMessage)}
     </section>
   `;
 }
@@ -3156,6 +3461,44 @@ function filterChip(value, label) {
 }
 
 function renderSearch() {
+  const loading = state.searchStatus === "loading";
+  let content = renderQuickSearches();
+  if (state.query && loading) {
+    content = `
+      <p class="result-label">Searching for ${escapeHtml(state.query)}</p>
+      ${renderFeedLoader()}
+    `;
+  } else if (state.query && state.searchStatus === "error") {
+    content = `
+      <section class="empty-panel search-state" role="alert">
+        <h2>Search could not finish.</h2>
+        <p>${escapeHtml(state.error || "Check your connection and try again.")}</p>
+        <button class="primary-button" type="button" data-action="retry-search">Try again</button>
+      </section>
+    `;
+  } else if (state.query && state.searchStatus === "idle") {
+    content = `
+      <section class="empty-panel search-state">
+        <h2>Search paused.</h2>
+        <p>Run this search again when you are ready.</p>
+        <button class="primary-button" type="button" data-action="retry-search">Search again</button>
+      </section>
+    `;
+  } else if (state.query && !state.searchResults.length) {
+    content = `
+      <section class="empty-panel search-state">
+        <h2>No videos found.</h2>
+        <p>Try a channel name, topic, or a shorter search.</p>
+      </section>
+    `;
+  } else if (state.query) {
+    const resultLabel = state.searchResults.length === 1 ? "result" : "results";
+    content = `
+      <p class="result-label">${state.searchResults.length} ${resultLabel} for ${escapeHtml(state.query)}</p>
+      ${renderVideoList(state.searchResults, "search")}
+    `;
+  }
+
   return `
     <section class="search-view">
       <h1 class="sr-only">Search</h1>
@@ -3164,20 +3507,32 @@ function renderSearch() {
           ${icon("search")}
           <input name="query" value="${escapeHtml(state.query)}" type="search" placeholder="Search SimaTube" aria-label="Search videos" autocomplete="off" />
         </label>
-        <button class="text-button" type="submit">Search</button>
+        <button class="text-button" type="submit" data-action="search-submit"${pendingButtonAttributes(loading)}>Search</button>
       </form>
-      ${state.query ? `<p class="result-label">${state.searchResults.length} results for ${escapeHtml(state.query)}</p>` : ""}
-      ${state.query ? renderVideoList(state.searchResults, "search") : renderQuickSearches()}
+      ${content}
     </section>
   `;
 }
 
 function renderQuickSearches() {
+  const recent = state.searchHistory.slice(0, 5);
   return `
-    <section class="quick-grid">
-      ${["Music", "Gaming", "News", "Live", "Podcasts", "Tech"].map((item) => `
-        <button class="quick-tile" type="button" data-action="quick-search" data-query="${escapeHtml(item)}">${escapeHtml(item)}</button>
-      `).join("")}
+    <section class="search-discovery">
+      ${recent.length ? `
+        <div class="search-section-head">
+          <h2>Recent</h2>
+          <button class="text-button" type="button" data-action="clear-search-history">Clear</button>
+        </div>
+        <div class="recent-searches">
+          ${recent.map((query) => `<button class="chip" type="button" data-action="quick-search" data-query="${escapeHtml(query)}">${icon("history")}<span>${escapeHtml(query)}</span></button>`).join("")}
+        </div>
+      ` : ""}
+      <div class="search-section-head"><h2>Explore</h2></div>
+      <div class="quick-grid">
+        ${["Music", "Gaming", "News", "Live", "Podcasts", "Tech"].map((item) => `
+          <button class="quick-tile" type="button" data-action="quick-search" data-query="${escapeHtml(item)}">${escapeHtml(item)}</button>
+        `).join("")}
+      </div>
     </section>
   `;
 }
@@ -3187,6 +3542,13 @@ function renderWatch() {
   const subscribed = Boolean(state.subscriptionIdsByChannel[video.channelId]);
   const liked = state.ratings[video.id] === "like";
   const saved = state.savedIds.has(video.id);
+  const commentsStatus = state.commentsStatusByVideoId[video.id] || "idle";
+  const commentsPending = commentsStatus === "loading" || state.pendingActions.has(`comments:${video.id}`);
+  const commentsActionLabel = {
+    error: "Retry",
+    loaded: "Refresh",
+    loading: "Loading",
+  }[commentsStatus] || "Load";
   const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
 
   return `
@@ -3239,9 +3601,9 @@ function renderWatch() {
         <section class="comments-block">
           <div class="section-head">
             <h2>Comments</h2>
-            <button class="text-button" type="button" data-action="comments"${pendingButtonAttributes(state.pendingActions.has(`comments:${video.id}`))}>Load</button>
+            <button class="text-button" type="button" data-action="comments"${pendingButtonAttributes(commentsPending)}>${commentsActionLabel}</button>
           </div>
-          ${renderComments()}
+          ${renderComments(video.id)}
         </section>
       </section>
       <section class="queue-section">
@@ -3279,20 +3641,45 @@ function renderDescription(video) {
   `;
 }
 
-function renderComments() {
-  if (!state.comments.length) {
-    return `<p class="empty-text comments-empty">Comments load from YouTube when API access is available.</p>`;
+function renderComments(videoId) {
+  const status = state.commentsStatusByVideoId[videoId] || "idle";
+  const comments = state.commentsByVideoId[videoId] || [];
+  if (status === "loading") {
+    return `
+      <div class="comment-list comments-loading" role="status" aria-label="Loading comments">
+        ${Array.from({ length: 2 }, () => `
+          <article class="comment comment-skeleton" aria-hidden="true">
+            <span class="comment-avatar skeleton-box"></span>
+            <div><span class="skeleton-line wide"></span><span class="skeleton-line"></span></div>
+          </article>
+        `).join("")}
+      </div>
+    `;
+  }
+  if (status === "error") {
+    return `
+      <div class="inline-state error comments-empty" role="alert">
+        <strong>Comments are unavailable.</strong>
+        <span>${escapeHtml(state.commentsErrorByVideoId[videoId] || "Try again in a moment.")}</span>
+      </div>
+    `;
+  }
+  if (status === "loaded" && !comments.length) {
+    return `<p class="empty-text comments-empty">No comments yet.</p>`;
+  }
+  if (status === "idle") {
+    return `<p class="empty-text comments-empty">Load the top comments without leaving the video.</p>`;
   }
 
   return `
     <div class="comment-list">
-      ${state.comments.map((comment) => `
+      ${comments.map((comment) => `
         <article class="comment">
-          ${comment.avatar ? `<img src="${escapeHtml(comment.avatar)}" alt="" loading="lazy" decoding="async" data-image-fallback="comment" data-fallback-initial="${escapeHtml(channelInitial(comment.author))}" />` : `<span class="comment-avatar fallback-initial" aria-hidden="true">${escapeHtml(channelInitial(comment.author))}</span>`}
+          ${comment.avatar ? `<img src="${escapeHtml(comment.avatar)}" alt="" width="32" height="32" loading="lazy" decoding="async" data-image-fallback="comment" data-fallback-initial="${escapeHtml(channelInitial(comment.author))}" />` : `<span class="comment-avatar fallback-initial" aria-hidden="true">${escapeHtml(channelInitial(comment.author))}</span>`}
           <div>
             <strong>${escapeHtml(comment.author)}</strong>
             <p>${escapeHtml(comment.text)}</p>
-            <span>${Number(comment.likes).toLocaleString()} likes</span>
+            <span>${Number(comment.likes).toLocaleString()} ${Number(comment.likes) === 1 ? "like" : "likes"}</span>
           </div>
         </article>
       `).join("")}
@@ -3384,6 +3771,7 @@ function renderChannel() {
 
   const subscribed = Boolean(state.subscriptionIdsByChannel[channel.id]);
   const videos = sortedChannelVideos(channel.id);
+  const showLoader = state.channelLoading && !videos.length;
   const youtubeUrl = `https://www.youtube.com/channel/${encodeURIComponent(channel.id)}`;
   const meta = [
     channel.subscriberCount ? `${channel.subscriberCount} subscribers` : "",
@@ -3407,14 +3795,23 @@ function renderChannel() {
         ${channel.description ? `<p class="channel-description">${escapeHtml(channel.description)}</p>` : ""}
         <div class="channel-actions">
           <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe-channel" aria-pressed="${subscribed ? "true" : "false"}"${pendingButtonAttributes(state.pendingActions.has(`subscription:${channel.id}`))}>${subscribed ? "Subscribed" : "Subscribe"}</button>
-          <button class="text-button" type="button" data-action="refresh-channel"${pendingButtonAttributes(state.channelLoading)}>Refresh</button>
+          <button class="text-button" type="button" data-action="refresh-channel"${pendingButtonAttributes(state.channelLoading)}>${state.channelLoading ? "Refreshing" : "Refresh"}</button>
         </div>
       </section>
       <div class="channel-tabs" aria-label="Channel videos">
         ${channelTab("latest", "Latest")}
         ${channelTab("popular", "Popular")}
       </div>
-      ${state.channelLoading ? renderChannelLoader() : renderVideoList(videos, "channel")}
+      ${showLoader ? renderChannelLoader() : `
+        ${state.error ? `
+          <div class="inline-state error channel-inline-state" role="alert">
+            <strong>${videos.length ? "Channel refresh failed." : "Channel could not load."}</strong>
+            <span>${escapeHtml(state.error)}</span>
+            ${videos.length ? "" : `<button class="text-button" type="button" data-action="refresh-channel">Try again</button>`}
+          </div>
+        ` : ""}
+        ${videos.length || !state.error ? renderVideoList(videos, "channel", "This channel has no long-form videos yet.") : ""}
+      `}
     </section>
   `;
 }
@@ -3459,13 +3856,16 @@ function renderChannelLoader() {
 
 function renderYou() {
   const profile = state.auth.profile;
+  const savedVideos = savedLibraryVideos();
+  const likedPending = state.pendingActions.has("liked-videos");
+  const likedActionLabel = likedPending ? "Loading" : state.likedVideosLoaded ? "Refresh" : "Load";
   return `
     <section class="you-view">
       <section class="profile-head">
-        ${profile?.thumbnailUrl ? `<img src="${escapeHtml(profile.thumbnailUrl)}" alt="" decoding="async" data-image-fallback="profile" data-fallback-initial="${escapeHtml(channelInitial(profile.title))}" />` : `<span class="profile-avatar">${escapeHtml(channelInitial(profile?.title || "H"))}</span>`}
+        ${profile?.thumbnailUrl ? `<img src="${escapeHtml(profile.thumbnailUrl)}" alt="" width="58" height="58" decoding="async" data-image-fallback="profile" data-fallback-initial="${escapeHtml(channelInitial(profile.title))}" />` : `<span class="profile-avatar">${escapeHtml(channelInitial(profile?.title || "H"))}</span>`}
         <div>
           <h1>${escapeHtml(profile?.title || "You")}</h1>
-          <p>${profile ? "Signed in to SimaTube" : "Demo mode"}</p>
+          <p>${profile ? "Your SimaTube library" : "Saved and watched on this device"}</p>
         </div>
         <button class="text-button" type="button" data-action="${profile ? "signout" : "signin"}">${profile ? "Sign out" : "Sign in"}</button>
       </section>
@@ -3474,26 +3874,43 @@ function renderYou() {
           <h2>History</h2>
           <span>${state.localHistory.length}</span>
         </div>
-        ${renderVideoList(state.localHistory, "history")}
+        ${renderVideoList(state.localHistory, "history", "Videos you watch will appear here.")}
+      </section>
+      <section class="library-block">
+        <div class="section-head">
+          <h2>Saved</h2>
+          <span>${savedVideos.length}</span>
+        </div>
+        ${renderVideoList(savedVideos, "saved", "Save a video to keep it here.")}
       </section>
       <section class="library-block">
         <div class="section-head">
           <h2>Liked videos</h2>
-          <button class="text-button" type="button" data-action="liked"${pendingButtonAttributes(state.pendingActions.has("liked-videos"))}>Load</button>
+          ${profile ? `<button class="text-button" type="button" data-action="liked"${pendingButtonAttributes(likedPending)}>${likedActionLabel}</button>` : ""}
         </div>
-        ${renderVideoList(state.likedVideos, "liked")}
+        ${profile
+          ? likedPending && !state.likedVideos.length
+            ? `<p class="empty-text library-loading" role="status">Loading liked videos...</p>`
+            : renderVideoList(state.likedVideos, "liked", state.likedVideosLoaded ? "No liked videos yet." : "Load the videos you liked on YouTube.")
+          : `<p class="empty-text">Sign in to see videos you liked on YouTube.</p>`}
       </section>
     </section>
   `;
 }
 
-function renderVideoList(videos, source) {
+function initialRowsForSource(source) {
+  return ["history", "saved", "liked"].includes(source)
+    ? LIBRARY_INITIAL_VIDEO_ROWS
+    : INITIAL_VIDEO_ROWS;
+}
+
+function renderVideoList(videos, source, emptyMessage = "Nothing to show yet.") {
   const list = Array.isArray(videos) ? videos.filter(Boolean) : [];
   if (!list.length) {
-    return `<p class="empty-text">Nothing to show yet.</p>`;
+    return `<p class="empty-text">${escapeHtml(emptyMessage)}</p>`;
   }
 
-  const visibleLimit = state.visibleRowsBySource[source] || INITIAL_VIDEO_ROWS;
+  const visibleLimit = state.visibleRowsBySource[source] || initialRowsForSource(source);
   const visibleVideos = list.slice(0, visibleLimit);
   const remaining = Math.max(0, list.length - visibleVideos.length);
   return `
@@ -3627,6 +4044,7 @@ function icon(name) {
     external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14V3ZM5 5h6v2H5v12h12v-6h2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg>',
     fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v2H8.4l3.3 3.3-1.4 1.4L7 8.4V11H5V5Zm8 0h6v6h-2V8.4l-3.3 3.3-1.4-1.4L15.6 7H13V5ZM7 15.6l3.3-3.3 1.4 1.4L8.4 17H11v2H5v-6h2v2.6ZM17 15.6V13h2v6h-6v-2h2.6l-3.3-3.3 1.4-1.4L17 15.6Z"/></svg>',
     fullscreenExit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.6 6.2V3h2v6.6H5v-2h3.2L4.7 4.1 6.1 2.7l3.5 3.5Zm6.2 1.4H19v2h-6.6V3h2v3.2l3.5-3.5 1.4 1.4-3.5 3.5ZM8.2 16.4H5v-2h6.6V21h-2v-3.2l-3.5 3.5-1.4-1.4 3.5-3.5Zm6.2 1.4V21h-2v-6.6H19v2h-3.2l3.5 3.5-1.4 1.4-3.5-3.5Z"/></svg>',
+    history: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-7.74 10H6.4A6 6 0 1 0 8 7.1V10H6V4h6v2H9.45A7.95 7.95 0 0 1 12 4Zm-1 3h2v4.45l3.12 1.8-1 1.73L11 12.6V7Z"/></svg>',
     home: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.7 12 4l8 6.7V20h-5v-5.5H9V20H4v-9.3Z"/></svg>',
     more: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>',
     plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>',
@@ -3903,6 +4321,9 @@ function queueForSource(source) {
   if (source === "liked") {
     return state.likedVideos;
   }
+  if (source === "saved") {
+    return savedLibraryVideos();
+  }
   if (source === "subscriptions") {
     return state.subscriptionVideos;
   }
@@ -4026,16 +4447,28 @@ app.addEventListener("click", async (event) => {
     await loadComments(currentVideo().id);
   }
   if (action === "liked") {
-    await loadLikedVideos();
+    await loadLikedVideos({ refresh: true });
   }
   if (action === "refresh-subs") {
     target.disabled = true;
     target.setAttribute("aria-busy", "true");
+    target.textContent = "Refreshing";
     state.homeFeedLoaded = false;
     await loadSubscriptionsAndFeed({ refresh: true, includeHome: state.view === "home" });
   }
   if (action === "refresh-channel") {
+    target.disabled = true;
+    target.setAttribute("aria-busy", "true");
+    target.textContent = "Refreshing";
     await loadActiveChannel({ refresh: true });
+  }
+  if (action === "retry-search") {
+    await runSearch(state.query, { refresh: true });
+  }
+  if (action === "clear-search-history") {
+    state.searchHistory = [];
+    writeJson("yt_search_history", []);
+    render();
   }
   if (action === "channel-sort") {
     state.channelSort = target.dataset.sort || "latest";
@@ -4043,7 +4476,7 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "load-more") {
     const source = target.dataset.source || "home";
-    state.visibleRowsBySource[source] = (state.visibleRowsBySource[source] || INITIAL_VIDEO_ROWS)
+    state.visibleRowsBySource[source] = (state.visibleRowsBySource[source] || initialRowsForSource(source))
       + VIDEO_ROWS_INCREMENT;
     render();
   }
