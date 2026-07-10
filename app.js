@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-watch-player-v6";
+const CACHE_CLEANUP_VERSION = "2026-07-home-tabs-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -3447,7 +3447,7 @@ function scheduleInfiniteVideoScroll() {
 
 function activeVideoListSource() {
   if (state.view === "home") {
-    return ["history", "saved"].includes(state.homeFilter) ? state.homeFilter : "home";
+    return state.homeFilter === "saved" ? "saved" : "home";
   }
   if (state.view === "search") {
     return "search";
@@ -3498,14 +3498,6 @@ function filteredHomeFeed() {
 
   if (state.homeFilter === "saved") {
     return savedLibraryVideos();
-  }
-
-  if (state.homeFilter === "explore") {
-    return state.homeFeed.filter((video) => !state.subscriptionIdsByChannel[video.channelId]);
-  }
-
-  if (state.homeFilter === "history") {
-    return state.localHistory;
   }
 
   return state.homeFeed;
@@ -3960,13 +3952,11 @@ function renderReconnectScreen() {
 
 function renderHome() {
   const feed = filteredHomeFeed();
-  const feedSource = ["history", "saved"].includes(state.homeFilter) ? state.homeFilter : "home";
+  const feedSource = state.homeFilter === "saved" ? "saved" : "home";
   const personalized = Boolean(state.auth.profile || state.usingCachedPersonalFeed);
   const emptyMessage = {
     today: "No new long-form videos today.",
-    explore: "No discovery picks are ready yet.",
     saved: "Save a video to keep it here.",
-    history: "Videos you watch will appear here.",
   }[state.homeFilter] || "No videos are ready yet.";
   return `
     <section class="home-rail">
@@ -3976,9 +3966,7 @@ function renderHome() {
       <div class="chip-row" aria-label="Home filters">
         ${filterChip("all", personalized ? "For you" : "Popular")}
         ${filterChip("today", "New")}
-        ${filterChip("explore", "Explore")}
         ${filterChip("saved", "Saved")}
-        ${filterChip("history", "History")}
       </div>
       ${renderHomeStatus()}
       ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, feedSource, emptyMessage)}
@@ -5507,7 +5495,8 @@ app.addEventListener("click", async (event) => {
     await signOut();
   }
   if (action === "home-filter") {
-    state.homeFilter = target.dataset.filter;
+    const filter = target.dataset.filter || "all";
+    state.homeFilter = ["all", "today", "saved"].includes(filter) ? filter : "all";
     render();
   }
   if (action === "watch") {
