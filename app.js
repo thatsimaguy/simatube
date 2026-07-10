@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-watch-player-v2";
+const CACHE_CLEANUP_VERSION = "2026-07-watch-player-v3";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -3195,6 +3195,15 @@ function openWatch(videoId, queue = [], options = {}) {
   }
 
   const changed = state.view !== "watch" || state.activeVideoId !== videoId;
+  const canTapSwitchPlayer = Boolean(options.autoplay
+    && changed
+    && state.view === "watch"
+    && state.player
+    && state.playerReady
+    && state.playerVideoId
+    && state.playerVideoId !== videoId
+    && !state.playerError
+    && typeof state.player.loadVideoById === "function");
   if (changed && state.view === "watch") {
     updateProgressFromPlayer({ save: true });
     stopProgressSync();
@@ -3221,6 +3230,9 @@ function openWatch(videoId, queue = [], options = {}) {
   state.view = "watch";
   writeJson("yt_active_video_id", videoId);
   writeJson("yt_last_view", "watch");
+  if (canTapSwitchPlayer) {
+    switchVisiblePlayerDuringTap(video);
+  }
   if (options.remember !== false) {
     addHistory(video);
   }
@@ -3741,7 +3753,7 @@ function takeReusablePlayerShell() {
     return null;
   }
 
-  if (shell.dataset.videoId === state.activeVideoId && state.playerVideoId === state.activeVideoId) {
+  if (state.playerVideoId === state.activeVideoId) {
     shell.remove();
     return { shell, switchVideo: false, autoplay: false };
   }
@@ -4087,7 +4099,7 @@ function renderWatch() {
     loading: "Loading",
   }[commentsStatus] || "Load";
   const url = `${WATCH_BASE}?v=${encodeURIComponent(video.id)}`;
-  const autoplayPending = state.pendingAutoplayVideoId === video.id;
+  const autoplayPending = state.pendingAutoplayVideoId === video.id || autoplayRecoveryActive(video.id);
 
   return `
     <section class="watch-view">
@@ -4719,6 +4731,40 @@ function handlePlayerStateChange(player, playerState) {
   }
 }
 
+function switchVisiblePlayerDuringTap(video) {
+  const player = state.player;
+  if (!player || !video || state.view !== "watch") {
+    return false;
+  }
+
+  const previousVideoId = state.playerVideoId;
+  const startSeconds = resumeStartSeconds(video);
+  state.playerVideoId = video.id;
+  state.playerReady = true;
+  state.playerNeedsUnmute = false;
+  state.playerSwitchIgnoreEndedUntil = Date.now() + 1600;
+  clearAutoplayRecovery(previousVideoId);
+  beginAutoplayRecovery(video.id);
+
+  try {
+    forceCaptionsOff(player);
+    player.loadVideoById({ videoId: video.id, startSeconds });
+    playWithSound(player);
+  } catch {
+    state.playerVideoId = previousVideoId;
+    clearAutoplayRecovery(video.id);
+    state.pendingAutoplayVideoId = video.id;
+    return false;
+  }
+
+  state.pendingAutoplayVideoId = "";
+  hidePosterForAutoplay();
+  window.setTimeout(() => retrySoundAutoplay(player, video.id), 250);
+  window.setTimeout(() => retrySoundAutoplay(player, video.id), 700);
+  window.setTimeout(() => ensureSoundAutoplay(player, video.id), 1500);
+  return true;
+}
+
 function switchRetainedPlayerToActiveVideo(autoplay) {
   const player = state.player;
   const video = currentVideo();
@@ -4926,16 +4972,20 @@ function startAutoplayPlayback(player, videoId) {
     state.pendingAutoplayVideoId = "";
   }
   beginAutoplayRecovery(videoId);
-  const poster = document.querySelector(".poster-button");
-  poster?.setAttribute("hidden", "");
-  poster?.classList.remove("is-loading");
-  poster?.removeAttribute("aria-busy");
+  hidePosterForAutoplay();
   forceCaptionsOff(player);
   playWithSound(player);
   window.setTimeout(() => retrySoundAutoplay(player, videoId), 300);
   window.setTimeout(() => retrySoundAutoplay(player, videoId), 850);
   window.setTimeout(() => retrySoundAutoplay(player, videoId), 1500);
   window.setTimeout(() => ensureSoundAutoplay(player, videoId), 2800);
+}
+
+function hidePosterForAutoplay() {
+  const poster = document.querySelector(".poster-button");
+  poster?.setAttribute("hidden", "");
+  poster?.classList.remove("is-loading");
+  poster?.removeAttribute("aria-busy");
 }
 
 function retrySoundAutoplay(player, videoId) {
