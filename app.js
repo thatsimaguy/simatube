@@ -17,7 +17,7 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const CACHE_CLEANUP_VERSION = "2026-07-ui-v5";
+const CACHE_CLEANUP_VERSION = "2026-07-fyp-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 1;
 const PERSONAL_CACHE_FRESH_MS = 30 * 60 * 1000;
@@ -1929,13 +1929,8 @@ function rankHomeCandidates(candidates) {
     }))
     .sort((a, b) => b.score - a.score);
 
-  const diversified = diversifyByChannel(scored).slice(0, 40);
-  state.feedReasonsById = Object.fromEntries(
-    diversified.map(({ video, source }) => [
-      video.id,
-      watchedIds.has(video.id) ? "Watch again" : feedReasonForSource(video, source),
-    ]),
-  );
+  const diversified = balanceHomeCandidates(scored).slice(0, 40);
+  state.feedReasonsById = {};
   return diversified.map(({ video }) => video);
 }
 
@@ -2045,6 +2040,63 @@ function diversifyByChannel(items) {
   });
 
   return [...picked, ...deferred];
+}
+
+function balanceHomeCandidates(items) {
+  const buckets = {
+    subscription: [],
+    interest: [],
+    popular: [],
+    other: [],
+  };
+  items.forEach((item) => {
+    (buckets[item.source] || buckets.other).push(item);
+  });
+
+  const sourcePattern = buckets.subscription.length
+    ? ["subscription", "interest", "popular", "interest", "subscription", "popular"]
+    : ["interest", "popular", "interest", "popular"];
+  const picked = [];
+  const pickedIds = new Set();
+  const channelCounts = new Map();
+
+  function takeFrom(source) {
+    const bucket = buckets[source] || [];
+    for (let index = 0; index < bucket.length; index += 1) {
+      const item = bucket[index];
+      const channelId = item.video?.channelId || "";
+      const channelLimit = picked.length < 18 ? 1 : 2;
+      if (pickedIds.has(item.video?.id) || (channelCounts.get(channelId) || 0) >= channelLimit) {
+        continue;
+      }
+      bucket.splice(index, 1);
+      pickedIds.add(item.video.id);
+      channelCounts.set(channelId, (channelCounts.get(channelId) || 0) + 1);
+      return item;
+    }
+    return null;
+  }
+
+  let cursor = 0;
+  while (picked.length < 40 && picked.length < items.length) {
+    const preferred = sourcePattern[cursor % sourcePattern.length];
+    cursor += 1;
+    const next = takeFrom(preferred)
+      || takeFrom("interest")
+      || takeFrom("subscription")
+      || takeFrom("popular")
+      || takeFrom("other")
+      || items.find((item) => !pickedIds.has(item.video?.id));
+    if (!next) {
+      break;
+    }
+    if (!pickedIds.has(next.video.id)) {
+      pickedIds.add(next.video.id);
+    }
+    picked.push(next);
+  }
+
+  return picked.length ? picked : diversifyByChannel(items);
 }
 
 function isLikelyShort(video) {
@@ -4259,15 +4311,6 @@ function renderVideoRow(video, source, itemIndex = -1) {
 }
 
 function videoFeedReason(video, source) {
-  if (source === "channel") {
-    return "From this channel";
-  }
-  if (source === "subscriptions") {
-    return "From your channels";
-  }
-  if (source === "home") {
-    return state.feedReasonsById[video.id] || feedReasonForSource(video, "popular");
-  }
   return "";
 }
 
@@ -4394,6 +4437,7 @@ function mountPlayer(autoplay) {
       videoId: video.id,
       playerVars: {
         autoplay: autoplay ? 1 : 0,
+        cc_load_policy: 0,
         controls: 1,
         enablejsapi: 1,
         fs: 0,
@@ -4409,6 +4453,8 @@ function mountPlayer(autoplay) {
           }
           state.playerReady = true;
           configurePlayerIframe();
+          player.unloadModule?.("captions");
+          player.unloadModule?.("cc");
           if (state.pendingAutoplayVideoId === video.id) {
             state.pendingAutoplayVideoId = "";
             document.querySelector(".poster-button")?.setAttribute("hidden", "");
@@ -4723,7 +4769,7 @@ app.addEventListener("click", async (event) => {
     render();
   }
   if (action === "watch") {
-    openWatch(target.dataset.videoId, queueForSource(target.dataset.source));
+    openWatch(target.dataset.videoId, queueForSource(target.dataset.source), { autoplay: true });
   }
   if (action === "play") {
     playActive();
