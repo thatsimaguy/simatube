@@ -803,9 +803,9 @@ label:focus-visible {
 }
 
 .home-refresh-button svg {
-  width: 20px;
-  height: 20px;
-  stroke-width: 2.35;
+  width: 23px;
+  height: 23px;
+  stroke-width: 3.8;
 }
 
 .home-refresh-button:hover,
