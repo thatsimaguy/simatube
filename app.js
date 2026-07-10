@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-fs-exit-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-fs-exit-bar-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -5389,7 +5389,7 @@ function exitPlayerFullscreenWithAnimation(button) {
   state.fullscreenExitTimer = window.setTimeout(() => {
     state.fullscreenExitTimer = 0;
     closePlayerFullscreen();
-  }, 170);
+  }, 230);
 }
 
 function showPlayerFullscreenControls() {
