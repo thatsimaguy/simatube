@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-watch-player-v5";
+const CACHE_CLEANUP_VERSION = "2026-07-watch-player-v6";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -221,6 +221,9 @@ const state = {
   playerReady: false,
   playerError: null,
   playerSwitchIgnoreEndedUntil: 0,
+  standaloneWatchTapCandidate: null,
+  standaloneHandledWatchVideoId: "",
+  standaloneHandledWatchUntil: 0,
   ytApiReady: false,
   playerApiLoadTimer: 0,
 };
@@ -5327,6 +5330,84 @@ function queueForSource(source) {
   return state.homeFeed;
 }
 
+function closestFromEvent(event, selector) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return null;
+  }
+  const match = target.closest(selector);
+  return match && app.contains(match) ? match : null;
+}
+
+function canEarlySwitchStandaloneWatch(videoId) {
+  return Boolean(isHomeScreenMode()
+    && videoId
+    && state.view === "watch"
+    && state.activeVideoId !== videoId
+    && state.player
+    && state.playerReady
+    && state.playerVideoId
+    && state.playerVideoId !== videoId
+    && !state.playerError
+    && typeof state.player.loadVideoById === "function");
+}
+
+function rememberStandaloneWatchCandidate(event) {
+  const target = closestFromEvent(event, '[data-action="watch"]');
+  const videoId = target?.dataset.videoId || "";
+  if (!canEarlySwitchStandaloneWatch(videoId)) {
+    state.standaloneWatchTapCandidate = null;
+    return;
+  }
+
+  state.standaloneWatchTapCandidate = {
+    videoId,
+    source: target.dataset.source || "",
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    at: Date.now(),
+  };
+}
+
+function handleStandaloneWatchPointerUp(event) {
+  const candidate = state.standaloneWatchTapCandidate;
+  state.standaloneWatchTapCandidate = null;
+  if (!candidate || candidate.pointerId !== event.pointerId) {
+    return false;
+  }
+  if (Date.now() - candidate.at > 900) {
+    return false;
+  }
+  if (Math.abs(event.clientX - candidate.x) > 14 || Math.abs(event.clientY - candidate.y) > 14) {
+    return false;
+  }
+
+  const target = closestFromEvent(event, '[data-action="watch"]');
+  const videoId = target?.dataset.videoId || candidate.videoId;
+  if (videoId !== candidate.videoId || !canEarlySwitchStandaloneWatch(videoId)) {
+    return false;
+  }
+
+  tryLockPortraitOrientation();
+  state.standaloneHandledWatchVideoId = videoId;
+  state.standaloneHandledWatchUntil = Date.now() + 1200;
+  openWatch(videoId, queueForSource(candidate.source), { autoplay: true });
+  return true;
+}
+
+function consumeStandaloneHandledWatch(videoId) {
+  if (!videoId
+    || state.standaloneHandledWatchVideoId !== videoId
+    || Date.now() > state.standaloneHandledWatchUntil) {
+    return false;
+  }
+
+  state.standaloneHandledWatchVideoId = "";
+  state.standaloneHandledWatchUntil = 0;
+  return true;
+}
+
 function handleImageError(image) {
   const kind = image.dataset.imageFallback;
   if (!kind) {
@@ -5368,7 +5449,8 @@ app.addEventListener("error", (event) => {
 }, true);
 
 app.addEventListener("pointerdown", (event) => {
-  const target = event.target.closest('[data-action="watch"], [data-action="play"]');
+  rememberStandaloneWatchCandidate(event);
+  const target = closestFromEvent(event, '[data-action="watch"], [data-action="play"]');
   if (!target) {
     return;
   }
@@ -5380,6 +5462,14 @@ app.addEventListener("pointerdown", (event) => {
   loadYouTubeIframeApi({ quiet: true });
 }, { passive: true });
 
+app.addEventListener("pointerup", (event) => {
+  handleStandaloneWatchPointerUp(event);
+}, { passive: true });
+
+app.addEventListener("pointercancel", () => {
+  state.standaloneWatchTapCandidate = null;
+}, { passive: true });
+
 app.addEventListener("click", async (event) => {
   tryLockPortraitOrientation();
 
@@ -5387,7 +5477,7 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
-  const target = event.target.closest("[data-action]");
+  const target = closestFromEvent(event, "[data-action]");
   if (!target) {
     return;
   }
@@ -5421,6 +5511,9 @@ app.addEventListener("click", async (event) => {
     render();
   }
   if (action === "watch") {
+    if (consumeStandaloneHandledWatch(target.dataset.videoId)) {
+      return;
+    }
     openWatch(target.dataset.videoId, queueForSource(target.dataset.source), { autoplay: true });
   }
   if (action === "play") {
