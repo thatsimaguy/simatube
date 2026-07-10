@@ -17,8 +17,8 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const AUTOPLAY_RECOVERY_MS = 5500;
-const CACHE_CLEANUP_VERSION = "2026-07-autoplay-stable-v1";
+const AUTOPLAY_RECOVERY_MS = 4200;
+const CACHE_CLEANUP_VERSION = "2026-07-autoplay-sound-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -218,6 +218,7 @@ const state = {
   autoplayRecoveryVideoId: "",
   autoplayRecoveryUntil: 0,
   autoplayHasStarted: false,
+  playerNeedsUnmute: false,
   playerReady: false,
   playerError: null,
   ytApiReady: false,
@@ -3209,6 +3210,7 @@ function openWatch(videoId, queue = [], options = {}) {
     state.pendingAutoplayVideoId = "";
     cancelPendingPlayerApiLoad();
   }
+  state.playerNeedsUnmute = false;
   state.activeVideoId = videoId;
   state.queue = queue.length ? queue : state.homeFeed;
   state.commentsLoadVersion += 1;
@@ -4047,6 +4049,10 @@ function renderWatch() {
           <span class="big-play" aria-hidden="true">${icon("play")}</span>
           <span class="duration">${escapeHtml(video.duration)}</span>
         </button>
+        <button class="player-sound-button${state.playerNeedsUnmute ? "" : " hidden"}" type="button" data-action="unmute-player" aria-label="Turn sound on" title="Turn sound on">
+          ${icon("volume")}
+          <span>Sound</span>
+        </button>
         ${state.playerError ? `
           <div class="player-fallback">
             <strong>Playback blocked here</strong>
@@ -4578,6 +4584,7 @@ function icon(name) {
     thumb: '<path d="M7 10v12"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.8a2 2 0 0 0 1.8-1.1L12 2a3.1 3.1 0 0 1 3 3.9Z"/>',
     "thumb-filled": '<path d="M7 10v12H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" fill="currentColor" stroke="none"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H9V9.5L12 2a3.1 3.1 0 0 1 3 3.9Z" fill="currentColor" stroke="none"/>',
     user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    volume: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/>',
   });
   const path = icons[name] || icons.more;
   return `<svg class="ui-icon ui-icon-${escapeHtml(name)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
@@ -4618,7 +4625,7 @@ function mountPlayer(autoplay) {
         fs: 0,
         iv_load_policy: 3,
         modestbranding: 1,
-        mute: autoplay ? 1 : 0,
+        mute: 0,
         origin: window.location.origin,
         playsinline: 1,
         rel: 0,
@@ -4644,6 +4651,7 @@ function mountPlayer(autoplay) {
             startProgressSync();
             if (autoplayRecoveryActive(video.id)) {
               state.autoplayHasStarted = true;
+              syncPlayerSoundPrompt(player, video.id);
               settleAutoplayStart(player, video.id);
             }
           }
@@ -4651,13 +4659,13 @@ function mountPlayer(autoplay) {
             updateProgressFromPlayer({ save: true });
             stopProgressSync();
             if (autoplayRecoveryActive(video.id) && !state.autoplayHasStarted) {
-              retryMutedAutoplay(player, video.id);
+              fallbackMutedAutoplay(player, video.id);
             }
           }
           if (event.data === window.YT?.PlayerState?.CUED
             && state.view === "watch"
             && state.activeVideoId === video.id) {
-            retryMutedAutoplay(player, video.id);
+            retrySoundAutoplay(player, video.id);
           }
           if (state.player === player
             && state.playerVideoId === video.id
@@ -4704,6 +4712,7 @@ function beginAutoplayRecovery(videoId) {
   state.autoplayRecoveryVideoId = videoId;
   state.autoplayRecoveryUntil = Date.now() + AUTOPLAY_RECOVERY_MS;
   state.autoplayHasStarted = false;
+  setPlayerSoundPrompt(false, videoId);
 }
 
 function autoplayRecoveryActive(videoId) {
@@ -4758,6 +4767,40 @@ function playMuted(player) {
   } catch {}
 }
 
+function playWithSound(player) {
+  try {
+    player.unMute?.();
+  } catch {}
+  try {
+    player.setVolume?.(100);
+  } catch {}
+  try {
+    player.playVideo?.();
+  } catch {}
+}
+
+function isPlayerMuted(player) {
+  try {
+    return Boolean(player.isMuted?.());
+  } catch {
+    return false;
+  }
+}
+
+function setPlayerSoundPrompt(visible, videoId = state.activeVideoId) {
+  if (videoId !== state.activeVideoId) {
+    return;
+  }
+  state.playerNeedsUnmute = Boolean(visible);
+  document.querySelectorAll(".player-sound-button").forEach((button) => {
+    button.classList.toggle("hidden", !state.playerNeedsUnmute);
+  });
+}
+
+function syncPlayerSoundPrompt(player, videoId) {
+  setPlayerSoundPrompt(isPlayerMuted(player), videoId);
+}
+
 function startAutoplayPlayback(player, videoId) {
   if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
     return;
@@ -4768,15 +4811,14 @@ function startAutoplayPlayback(player, videoId) {
   poster?.classList.remove("is-loading");
   poster?.removeAttribute("aria-busy");
   forceCaptionsOff(player);
-  playMuted(player);
-  window.setTimeout(() => retryMutedAutoplay(player, videoId), 250);
-  window.setTimeout(() => retryMutedAutoplay(player, videoId), 900);
-  window.setTimeout(() => retryMutedAutoplay(player, videoId), 1900);
-  window.setTimeout(() => retryMutedAutoplay(player, videoId), 3400);
-  window.setTimeout(() => ensureAutoplayStarted(player, videoId), 5600);
+  playWithSound(player);
+  window.setTimeout(() => retrySoundAutoplay(player, videoId), 300);
+  window.setTimeout(() => retrySoundAutoplay(player, videoId), 850);
+  window.setTimeout(() => fallbackMutedAutoplay(player, videoId), 1500);
+  window.setTimeout(() => ensureAutoplayStarted(player, videoId), 3200);
 }
 
-function retryMutedAutoplay(player, videoId) {
+function retrySoundAutoplay(player, videoId) {
   if (state.player !== player || state.playerVideoId !== videoId || state.activeVideoId !== videoId) {
     return;
   }
@@ -4785,11 +4827,28 @@ function retryMutedAutoplay(player, videoId) {
     return;
   }
   if (playerPlaybackState(player) !== window.YT?.PlayerState?.PLAYING) {
-    playMuted(player);
+    playWithSound(player);
     return;
   }
   state.autoplayHasStarted = true;
+  syncPlayerSoundPrompt(player, videoId);
   settleAutoplayStart(player, videoId);
+}
+
+function fallbackMutedAutoplay(player, videoId) {
+  if (!autoplayRecoveryActive(videoId)
+    || state.player !== player
+    || state.playerVideoId !== videoId
+    || state.activeVideoId !== videoId) {
+    return;
+  }
+  if (playerPlaybackState(player) === window.YT?.PlayerState?.PLAYING) {
+    syncPlayerSoundPrompt(player, videoId);
+    settleAutoplayStart(player, videoId);
+    return;
+  }
+  playMuted(player);
+  setPlayerSoundPrompt(true, videoId);
 }
 
 function ensureAutoplayStarted(player, videoId) {
@@ -4800,10 +4859,12 @@ function ensureAutoplayStarted(player, videoId) {
     return;
   }
   if (playerPlaybackState(player) === window.YT?.PlayerState?.PLAYING) {
+    syncPlayerSoundPrompt(player, videoId);
     settleAutoplayStart(player, videoId);
     return;
   }
   playMuted(player);
+  setPlayerSoundPrompt(true, videoId);
   window.setTimeout(() => {
     if (playerPlaybackState(player) === window.YT?.PlayerState?.PLAYING) {
       clearAutoplayRecovery(videoId);
@@ -4882,6 +4943,7 @@ function destroyPlayer() {
   state.player = null;
   state.playerVideoId = "";
   state.playerReady = false;
+  state.playerNeedsUnmute = false;
   clearAutoplayRecovery(videoId);
 
   if (!player) {
@@ -5013,6 +5075,17 @@ function playActive() {
   }
 
   mountPlayer(true);
+}
+
+function unmuteActivePlayer() {
+  const player = state.player;
+  if (!player || state.playerVideoId !== state.activeVideoId) {
+    return;
+  }
+
+  playWithSound(player);
+  setPlayerSoundPrompt(false);
+  window.setTimeout(() => syncPlayerSoundPrompt(player, state.activeVideoId), 350);
 }
 
 function replayActive() {
@@ -5173,6 +5246,9 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "player-fullscreen") {
     await togglePlayerFullscreen();
+  }
+  if (action === "unmute-player") {
+    unmuteActivePlayer();
   }
   if (action === "replay") {
     replayActive();

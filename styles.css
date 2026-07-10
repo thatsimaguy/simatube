@@ -1426,6 +1426,62 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen::after {
   opacity: 0;
 }
 
+.player-sound-button {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 7;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 999px;
+  background: rgba(8, 8, 8, .78);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .34);
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  transition: opacity .18s ease, transform .18s ease, background .18s ease;
+}
+
+.player-sound-button.hidden {
+  display: none;
+}
+
+.player-sound-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.player-sound-button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.player-sound-button:hover {
+  background: rgba(22, 22, 22, .9);
+}
+
+html.player-fullscreen-open .player-sound-button {
+  position: fixed;
+  right: calc(14px + env(safe-area-inset-right, 0px));
+  bottom: calc(82px + env(safe-area-inset-bottom, 0px));
+  z-index: 140;
+  height: 42px;
+  padding: 0 14px;
+}
+
+html.player-fullscreen-controls-hidden .player-sound-button {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(12px);
+}
+
 .poster-button {
   position: absolute;
   inset: 0;
