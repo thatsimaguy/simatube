@@ -17,7 +17,7 @@ const BOOT_STABLE_DELAY_MS = 15000;
 const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
-const CACHE_CLEANUP_VERSION = "2026-07-v4";
+const CACHE_CLEANUP_VERSION = "2026-07-ui-v5";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 1;
 const PERSONAL_CACHE_FRESH_MS = 30 * 60 * 1000;
@@ -1021,8 +1021,8 @@ async function requestToken(scopes, options = {}) {
   if (!hasOAuthClient()) {
     if (!options.quiet) {
       openSheet("Sign in needs setup", setupCopy(), [
-        { label: "Open Google Cloud", href: "https://console.cloud.google.com/apis/credentials" },
-        { label: "Close", action: closeSheet },
+        { label: "Open Google Cloud", href: "https://console.cloud.google.com/apis/credentials", icon: "external" },
+        { label: "Close", action: closeSheet, icon: "close" },
       ]);
     }
     throw new Error("Missing OAuth client ID.");
@@ -1267,7 +1267,7 @@ async function signIn() {
     if (authVersion !== state.authVersion) {
       return;
     }
-    openSheet("Sign in did not finish", error.message, [{ label: "Close", action: closeSheet }]);
+    openSheet("Sign in did not finish", error.message, [{ label: "Close", action: closeSheet, icon: "close" }]);
   } finally {
     clearLoading();
   }
@@ -1495,7 +1495,7 @@ function loadSubscriptionsAndFeed(options = {}) {
       state.loading = "";
       state.error = error.message;
       if (!options.quiet) {
-        openSheet("Could not load subscriptions", error.message, [{ label: "Close", action: closeSheet }]);
+        openSheet("Could not load subscriptions", error.message, [{ label: "Close", action: closeSheet, icon: "close" }]);
       }
       return false;
     })
@@ -1645,7 +1645,7 @@ async function performSubscriptionLoad(options = {}, loadVersion = state.subscri
     }
     state.error = error.message;
     if (!options.quiet) {
-      openSheet("Could not load subscriptions", error.message, [{ label: "Close", action: closeSheet }]);
+      openSheet("Could not load subscriptions", error.message, [{ label: "Close", action: closeSheet, icon: "close" }]);
     }
     return false;
   } finally {
@@ -2520,7 +2520,7 @@ async function loadLikedVideos(options = {}) {
     if (authVersion !== state.authVersion) {
       return false;
     }
-    openSheet("Liked videos unavailable", error.message, [{ label: "Close", action: closeSheet }]);
+    openSheet("Liked videos unavailable", error.message, [{ label: "Close", action: closeSheet, icon: "close" }]);
     return false;
   } finally {
     finishPendingAction(actionKey);
@@ -2553,7 +2553,7 @@ async function rateActiveVideo() {
     state.ratings[video.id] = nextRating;
     showToast(nextRating === "like" ? "Liked." : "Like removed.");
   } catch (error) {
-    openSheet("Like needs permission", error.message, [{ label: "Close", action: closeSheet }]);
+    openSheet("Like needs permission", error.message, [{ label: "Close", action: closeSheet, icon: "close" }]);
   } finally {
     finishPendingAction(actionKey);
     clearLoading();
@@ -2613,7 +2613,7 @@ async function subscribeToActiveChannel(channelId = currentVideo()?.channelId) {
     savePersonalCache({ subscriptions: true });
 
   } catch (error) {
-    openSheet("Subscribe needs permission", error.message, [{ label: "Close", action: closeSheet }]);
+    openSheet("Subscribe needs permission", error.message, [{ label: "Close", action: closeSheet, icon: "close" }]);
   } finally {
     finishPendingAction(actionKey);
     clearLoading();
@@ -3201,8 +3201,8 @@ async function shareVideo(video) {
     showToast("Link copied.");
   } catch {
     openSheet("Share", url, [
-      { label: "Open YouTube", href: url },
-      { label: "Close", action: closeSheet },
+      { label: "Open YouTube", href: url, icon: "external" },
+      { label: "Close", action: closeSheet, icon: "close" },
     ]);
   }
 }
@@ -3315,10 +3315,11 @@ function openSheet(title, body, actions = []) {
     openSheet.lastFocusSignature = focusSignature(document.activeElement);
   }
   const actionHtml = actions.map((action, index) => {
+    const actionIcon = action.icon ? icon(action.icon) : "";
     if (action.href) {
-      return `<a class="sheet-action" href="${escapeHtml(action.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(action.label)}</a>`;
+      return `<a class="sheet-action" href="${escapeHtml(action.href)}" target="_blank" rel="noopener noreferrer">${actionIcon}<span>${escapeHtml(action.label)}</span></a>`;
     }
-    return `<button class="sheet-action" type="button" data-sheet-action="${index}">${escapeHtml(action.label)}</button>`;
+    return `<button class="sheet-action" type="button" data-sheet-action="${index}">${actionIcon}<span>${escapeHtml(action.label)}</span></button>`;
   }).join("");
 
   sheetRoot.innerHTML = `
@@ -3545,8 +3546,8 @@ function renderTopbar() {
         <span class="brand-text">SimaTube</span>
       </button>
       <nav class="top-actions" aria-label="Quick actions">
-        <button class="icon-button" type="button" data-action="view" data-view="search" aria-label="Search">${icon("search")}</button>
-        <button class="avatar-button" type="button" data-action="${signedIn ? "view" : "signin"}" data-view="you" aria-label="Account">
+        <button class="icon-button" type="button" data-action="view" data-view="search" aria-label="Search" title="Search">${icon("search")}</button>
+        <button class="avatar-button" type="button" data-action="${signedIn ? "view" : "signin"}" data-view="you" aria-label="Account" title="Account">
           ${signedIn && state.auth.profile.thumbnailUrl ? `<img src="${escapeHtml(state.auth.profile.thumbnailUrl)}" alt="" decoding="async" data-image-fallback="profile" data-fallback-initial="${escapeHtml(channelInitial(state.auth.profile.title))}" />` : escapeHtml(channelInitial(state.auth.profile?.title || "H"))}
         </button>
       </nav>
@@ -3587,7 +3588,7 @@ function renderInstallIntro() {
       </div>
       <div class="install-first-steps">
         <div><strong>${icon("share")}</strong><span>Tap Share in Safari.</span></div>
-        <div><strong>+</strong><span>Choose Add to Home Screen.</span></div>
+        <div><strong>${icon("plus")}</strong><span>Choose Add to Home Screen.</span></div>
         <div><strong>${icon("check")}</strong><span>Open it from your Home Screen.</span></div>
       </div>
       <button class="done-button" type="button" data-action="install-intro-done">Done</button>
@@ -3683,7 +3684,7 @@ function renderHomeStatus() {
       <div class="inline-state error home-status" role="alert">
         <strong>Home could not refresh.</strong>
         <span>${escapeHtml(state.homeFeedError || "Try again in a moment.")}</span>
-        <button class="text-button" type="button" data-action="refresh-home">Try again</button>
+        <button class="text-button" type="button" data-action="refresh-home">${icon("refresh")}<span>Try again</span></button>
       </div>
     `;
   }
@@ -3791,12 +3792,20 @@ function renderSearch() {
 
 function renderQuickSearches() {
   const recent = state.searchHistory.slice(0, 5);
+  const topics = [
+    ["Music", "music"],
+    ["Gaming", "gamepad"],
+    ["News", "newspaper"],
+    ["Live", "radio"],
+    ["Podcasts", "podcast"],
+    ["Tech", "cpu"],
+  ];
   return `
     <section class="search-discovery">
       ${recent.length ? `
         <div class="search-section-head">
           <h2>Recent</h2>
-          <button class="text-button" type="button" data-action="clear-search-history">Clear</button>
+          <button class="text-button" type="button" data-action="clear-search-history">${icon("close")}<span>Clear</span></button>
         </div>
         <div class="recent-searches">
           ${recent.map((query) => `<button class="chip" type="button" data-action="quick-search" data-query="${escapeHtml(query)}">${icon("history")}<span>${escapeHtml(query)}</span></button>`).join("")}
@@ -3804,8 +3813,8 @@ function renderQuickSearches() {
       ` : ""}
       <div class="search-section-head"><h2>Explore</h2></div>
       <div class="quick-grid">
-        ${["Music", "Gaming", "News", "Live", "Podcasts", "Tech"].map((item) => `
-          <button class="quick-tile" type="button" data-action="quick-search" data-query="${escapeHtml(item)}">${escapeHtml(item)}</button>
+        ${topics.map(([item, iconName]) => `
+          <button class="quick-tile" type="button" data-action="quick-search" data-query="${escapeHtml(item)}">${icon(iconName)}<span>${escapeHtml(item)}</span></button>
         `).join("")}
       </div>
     </section>
@@ -3834,14 +3843,14 @@ function renderWatch() {
           ${video.posterUrl || video.thumbnailUrl
             ? `<img src="${escapeHtml(video.posterUrl || video.thumbnailUrl)}" alt="" decoding="async" fetchpriority="high" data-image-fallback="thumbnail" data-fallback-initial="${escapeHtml(channelInitial(video.title))}" />`
             : `<span class="thumbnail-fallback" aria-hidden="true">${escapeHtml(channelInitial(video.title))}</span>`}
-          <span class="big-play" aria-hidden="true"></span>
+          <span class="big-play" aria-hidden="true">${icon("play")}</span>
           <span class="duration">${escapeHtml(video.duration)}</span>
         </button>
         ${state.playerError ? `
           <div class="player-fallback">
             <strong>Playback blocked here</strong>
             <span>${escapeHtml(state.playerError)}</span>
-            <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open in YouTube</a>
+            <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${icon("external")}<span>Open in YouTube</span></a>
           </div>
         ` : ""}
       </div>
@@ -3869,14 +3878,14 @@ function renderWatch() {
         <div class="action-row" aria-label="Video actions">
           ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
           ${actionPill("replay", "Replay", "replay")}
-          ${actionPill("save", saved ? "Saved" : "Save", saved ? "check" : "plus", saved, true)}
+          ${actionPill("save", saved ? "Saved" : "Save", saved ? "bookmark-filled" : "bookmark", saved, true)}
           ${actionPill("share", "Share", "share")}
         </div>
         ${renderDescription(video)}
         <section class="comments-block">
           <div class="section-head">
             <h2>Comments</h2>
-            <button class="text-button" type="button" data-action="comments"${pendingButtonAttributes(commentsPending)}>${commentsActionLabel}</button>
+            <button class="text-button" type="button" data-action="comments"${pendingButtonAttributes(commentsPending)}>${icon("message")}<span>${commentsActionLabel}</span></button>
           </div>
           ${renderComments(video.id)}
         </section>
@@ -3884,7 +3893,7 @@ function renderWatch() {
       <section class="queue-section">
         <div class="section-head">
           <h2>Up next</h2>
-          <button class="text-button" type="button" data-action="next-video">Next</button>
+          <button class="text-button" type="button" data-action="next-video"><span>Next</span>${icon("chevron-right")}</button>
         </div>
         ${renderCompactQueue()}
       </section>
@@ -3911,6 +3920,7 @@ function renderDescription(video) {
       <label class="description-toggle" for="description-toggle">
         <span class="more-label">Show more</span>
         <span class="less-label">Show less</span>
+        <span class="description-toggle-icon" aria-hidden="true">${icon("chevron-down")}</span>
       </label>
     </section>
   `;
@@ -3934,16 +3944,17 @@ function renderComments(videoId) {
   if (status === "error") {
     return `
       <div class="inline-state error comments-empty" role="alert">
+        ${icon("alert")}
         <strong>Comments are unavailable.</strong>
         <span>${escapeHtml(state.commentsErrorByVideoId[videoId] || "Try again in a moment.")}</span>
       </div>
     `;
   }
   if (status === "loaded" && !comments.length) {
-    return `<p class="empty-text comments-empty">No comments yet.</p>`;
+    return `<div class="comments-placeholder comments-empty">${icon("message")}<span>No comments yet.</span></div>`;
   }
   if (status === "idle") {
-    return `<p class="empty-text comments-empty">Load the top comments without leaving the video.</p>`;
+    return `<div class="comments-placeholder comments-empty">${icon("message")}<span>Load the top comments without leaving the video.</span></div>`;
   }
 
   return `
@@ -3988,7 +3999,7 @@ function renderSubscriptions() {
     <section class="subscriptions-view">
       <div class="section-head sticky-head">
         <h1>Subscriptions</h1>
-        <button class="text-button" type="button" data-action="refresh-subs"${pendingButtonAttributes(Boolean(state.subscriptionLoadPromise))}>Refresh</button>
+        <button class="text-button" type="button" data-action="refresh-subs"${pendingButtonAttributes(Boolean(state.subscriptionLoadPromise))}>${icon("refresh")}<span>Refresh</span></button>
       </div>
       <div class="channel-strip">
         ${visibleChannels.map((channel) => `
@@ -3999,8 +4010,8 @@ function renderSubscriptions() {
         `).join("")}
         ${remainingChannels ? `
           <button class="channel-bubble channel-more" type="button" data-action="load-more-channels" aria-label="Show more channels">
-            <span class="channel-more-icon" aria-hidden="true">+${Math.min(remainingChannels, SUBSCRIPTION_CHANNEL_INCREMENT)}</span>
-            <span>More</span>
+            <span class="channel-more-icon" aria-hidden="true">${icon("plus")}</span>
+            <span>${Math.min(remainingChannels, SUBSCRIPTION_CHANNEL_INCREMENT)} more</span>
           </button>
         ` : ""}
       </div>
@@ -4057,7 +4068,7 @@ function renderChannel() {
     <section class="channel-view">
       <section class="channel-hero">
         <div class="channel-hero-top">
-          <button class="icon-button channel-back" type="button" data-action="view" data-view="home" aria-label="Back to Home">${icon("back")}</button>
+          <button class="icon-button channel-back" type="button" data-action="view" data-view="home" aria-label="Back to Home" title="Back to Home">${icon("back")}</button>
           <a class="channel-youtube-link" href="${escapeHtml(youtubeUrl)}" target="_blank" rel="noopener noreferrer">${icon("external")}<span>YouTube</span></a>
         </div>
         <div class="channel-identity">
@@ -4070,7 +4081,7 @@ function renderChannel() {
         ${channel.description ? `<p class="channel-description">${escapeHtml(channel.description)}</p>` : ""}
         <div class="channel-actions">
           <button class="subscribe-button${subscribed ? " subscribed" : ""}" type="button" data-action="subscribe-channel" aria-pressed="${subscribed ? "true" : "false"}"${pendingButtonAttributes(state.pendingActions.has(`subscription:${channel.id}`))}>${subscribed ? "Subscribed" : "Subscribe"}</button>
-          <button class="text-button" type="button" data-action="refresh-channel"${pendingButtonAttributes(state.channelLoading)}>${state.channelLoading ? "Refreshing" : "Refresh"}</button>
+          <button class="text-button" type="button" data-action="refresh-channel"${pendingButtonAttributes(state.channelLoading)}>${icon("refresh")}<span>${state.channelLoading ? "Refreshing" : "Refresh"}</span></button>
         </div>
       </section>
       <div class="channel-tabs" aria-label="Channel videos">
@@ -4161,7 +4172,7 @@ function renderYou() {
       <section class="library-block">
         <div class="section-head">
           <h2>Liked videos</h2>
-          ${profile ? `<button class="text-button" type="button" data-action="liked"${pendingButtonAttributes(likedPending)}>${likedActionLabel}</button>` : ""}
+          ${profile ? `<button class="text-button" type="button" data-action="liked"${pendingButtonAttributes(likedPending)}>${icon("refresh")}<span>${likedActionLabel}</span></button>` : ""}
         </div>
         ${profile
           ? likedPending && !state.likedVideos.length
@@ -4193,7 +4204,7 @@ function renderVideoList(videos, source, emptyMessage = "Nothing to show yet.") 
     ${remaining ? `
       <div class="load-more-row">
         <button class="secondary-button load-more-button" type="button" data-action="load-more" data-source="${escapeHtml(source)}">
-          Show ${Math.min(remaining, VIDEO_ROWS_INCREMENT)} more
+          <span>Show ${Math.min(remaining, VIDEO_ROWS_INCREMENT)} more</span>${icon("chevron-down")}
         </button>
       </div>
     ` : ""}
@@ -4224,7 +4235,7 @@ function renderVideoRow(video, source, itemIndex = -1) {
           ? `<img src="${escapeHtml(video.thumbnailUrl)}" alt="" width="480" height="360" loading="${imageLoading}" decoding="async" fetchpriority="${imagePriority}" data-image-fallback="thumbnail" data-fallback-initial="${escapeHtml(channelInitial(video.title))}" />`
           : `<span class="thumbnail-fallback" aria-hidden="true">${escapeHtml(channelInitial(video.title))}</span>`}
         ${saved ? `<span class="saved-badge">${icon("check")}Saved</span>` : ""}
-        ${watched ? `<span class="watch-progress" aria-hidden="true"></span>` : ""}
+        ${watched ? `<span class="watched-badge">${icon("history")}Watched</span>` : ""}
         ${video.duration ? `<span class="duration">${escapeHtml(video.duration)}</span>` : ""}
       </button>
       <div class="video-copy">
@@ -4242,7 +4253,7 @@ function renderVideoRow(video, source, itemIndex = -1) {
           </span>
         </span>
       </div>
-      <button class="kebab" type="button" data-action="sheet" data-sheet="row-more" data-video-id="${escapeHtml(video.id)}" aria-label="More">${icon("more")}</button>
+      <button class="kebab" type="button" data-action="sheet" data-sheet="row-more" data-video-id="${escapeHtml(video.id)}" aria-label="More actions for ${escapeHtml(video.title)}" title="More actions">${icon("more")}</button>
     </article>
   `;
 }
@@ -4299,40 +4310,60 @@ function renderBottomNav() {
 }
 
 function navButton(view, label, iconName) {
-  const active = state.view === view ? " active" : "";
-  const current = state.view === view ? ` aria-current="page"` : "";
+  const isActive = state.view === view;
+  const active = isActive ? " active" : "";
+  const current = isActive ? ` aria-current="page"` : "";
+  const activeIconName = isActive && ["home", "search", "subs", "user"].includes(iconName)
+    ? `${iconName}-active`
+    : iconName;
   return `
     <button class="nav-item${active}" type="button" data-action="view" data-view="${escapeHtml(view)}" aria-label="${escapeHtml(label)}"${current}>
-      ${icon(iconName)}
+      ${icon(activeIconName)}
       <span>${escapeHtml(label)}</span>
     </button>
   `;
 }
 
 function icon(name) {
-  const icons = {
-    back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11v2H8.8l4.6 4.6L12 19 5 12l7-7 1.4 1.4L8.8 11H20Z"/></svg>',
-    bell: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.6 2.6 0 0 0 2.45-1.75h-4.9A2.6 2.6 0 0 0 12 22Zm7-6.5V11a7 7 0 0 0-5.2-6.77V3a1.8 1.8 0 1 0-3.6 0v1.23A7 7 0 0 0 5 11v4.5l-1.7 2.27A.75.75 0 0 0 3.9 19h16.2a.75.75 0 0 0 .6-1.23L19 15.5ZM7 11a5 5 0 0 1 10 0v5.17l.62.83H6.38L7 16.17V11Z"/></svg>',
-    cast: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5V5.25A2.25 2.25 0 0 1 5.25 3h13.5A2.25 2.25 0 0 1 21 5.25v13.5A2.25 2.25 0 0 1 18.75 21H16.5v-2h2.25a.25.25 0 0 0 .25-.25V5.25a.25.25 0 0 0-.25-.25H5.25a.25.25 0 0 0-.25.25V7.5H3Zm0 10.25v-2.1A5.35 5.35 0 0 1 8.35 21h2.1v-2h-2.1A3.35 3.35 0 0 0 5 15.65v-2.2A5.55 5.55 0 0 1 10.55 19H13v-2h-2.45A7.55 7.55 0 0 0 3 9.45v2.1A5.45 5.45 0 0 1 8.45 17H13v-2H8.45A3.45 3.45 0 0 0 5 11.55v6.2H3Z"/></svg>',
-    check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.2 16.6-4.1-4.1-1.4 1.4 5.5 5.5L21 7.6 19.6 6 9.2 16.6Z"/></svg>',
-    close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>',
-    external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14V3ZM5 5h6v2H5v12h12v-6h2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg>',
-    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v2H8.4l3.3 3.3-1.4 1.4L7 8.4V11H5V5Zm8 0h6v6h-2V8.4l-3.3 3.3-1.4-1.4L15.6 7H13V5ZM7 15.6l3.3-3.3 1.4 1.4L8.4 17H11v2H5v-6h2v2.6ZM17 15.6V13h2v6h-6v-2h2.6l-3.3-3.3 1.4-1.4L17 15.6Z"/></svg>',
-    fullscreenExit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.6 6.2V3h2v6.6H5v-2h3.2L4.7 4.1 6.1 2.7l3.5 3.5Zm6.2 1.4H19v2h-6.6V3h2v3.2l3.5-3.5 1.4 1.4-3.5 3.5ZM8.2 16.4H5v-2h6.6V21h-2v-3.2l-3.5 3.5-1.4-1.4 3.5-3.5Zm6.2 1.4V21h-2v-6.6H19v2h-3.2l3.5 3.5-1.4 1.4-3.5-3.5Z"/></svg>',
-    history: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-7.74 10H6.4A6 6 0 1 0 8 7.1V10H6V4h6v2H9.45A7.95 7.95 0 0 1 12 4Zm-1 3h2v4.45l3.12 1.8-1 1.73L11 12.6V7Z"/></svg>',
-    home: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.7 12 4l8 6.7V20h-5v-5.5H9V20H4v-9.3Z"/></svg>',
-    more: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>',
-    plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>',
-    replay: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 13.66-5.66L20 4v6h-6l2.24-2.24A6 6 0 1 0 18 12h2a8 8 0 1 1-16 0Zm7-4h2v4.15l3.18 1.84-1 1.74L11 13.31V8Z"/></svg>',
-    search: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20.49 19.07-4.08-4.08a7.2 7.2 0 1 0-1.42 1.42l4.08 4.08 1.42-1.42ZM5 10.2a5.2 5.2 0 1 1 10.4 0 5.2 5.2 0 0 1-10.4 0Z"/></svg>',
-    share: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7a3.3 3.3 0 0 0 0-1.39l7.05-4.1A3 3 0 1 0 15 5c0 .24.03.47.08.69L8.03 9.8a3 3 0 1 0 0 4.4l7.12 4.16c-.04.18-.06.37-.06.56a2.91 2.91 0 1 0 2.91-2.84Z"/></svg>',
-    subs: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 13.5v-7Zm2.5-.5a.5.5 0 0 0-.5.5v7a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.5-.5h-11ZM8 18h8v2H8v-2Zm3-9 4 2.2-4 2.3V9Z"/></svg>',
-    thumb: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.1 21H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h4.1l3.18-5.5a2.5 2.5 0 0 1 4.66 1.65L15.35 9H20a2.5 2.5 0 0 1 2.45 3l-1.4 7A2.5 2.5 0 0 1 18.6 21H8.1ZM8 11H4v8h4v-8Zm2 7.98h8.6a.5.5 0 0 0 .49-.4l1.4-7A.5.5 0 0 0 20 11h-7l.95-6.13a.5.5 0 0 0-.93-.33L10 9.78v9.2Z"/></svg>',
-    "thumb-filled": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 21H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h4v12Zm2 0h8.6a2.5 2.5 0 0 0 2.45-2l1.4-7A2.5 2.5 0 0 0 20 9h-4.65l.59-3.85a2.5 2.5 0 0 0-4.66-1.65L8.5 8.32V21H10Z"/></svg>',
-    user: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4.1 0-7 2.2-7 5v1h14v-1c0-2.8-2.9-5-7-5Z"/></svg>',
-  };
-
-  return icons[name] || icons.more;
+  const icons = icon.paths || (icon.paths = {
+    alert: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+    back: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+    bookmark: '<path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z"/>',
+    "bookmark-filled": '<path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1Z" fill="currentColor" stroke="none"/>',
+    check: '<path d="m20 6-11 11-5-5"/>',
+    "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+    "chevron-right": '<path d="m9 18 6-6-6-6"/>',
+    close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
+    external: '<path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
+    fullscreenExit: '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M16 3v3a2 2 0 0 0 2 2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>',
+    gamepad: '<path d="M6 11h4"/><path d="M8 9v4"/><path d="M15 12h.01"/><path d="M18 10h.01"/><path d="M17.32 5H6.68a4 4 0 0 0-3.86 3l-1.1 4.4A5 5 0 0 0 6.57 18H7l2-2h6l2 2h.43a5 5 0 0 0 4.85-5.6L21.18 8a4 4 0 0 0-3.86-3Z"/>',
+    history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+    home: '<path d="m3 10 9-7 9 7"/><path d="M5 9v11h14V9"/><path d="M9 20v-6h6v6"/>',
+    "home-active": '<path d="M3 10.8 12 3l9 7.8V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" fill="currentColor" stroke="none"/>',
+    message: '<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/>',
+    more: '<circle cx="12" cy="5" r="1.25" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.25" fill="currentColor" stroke="none"/>',
+    music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+    newspaper: '<path d="M4 22h16a2 2 0 0 0 2-2V4H8v16a2 2 0 0 1-4 0V6H2v14a2 2 0 0 0 2 2Z"/><path d="M12 8h6M12 12h6M12 16h6"/>',
+    play: '<path d="m7 4 13 8-13 8Z" fill="currentColor" stroke="none"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
+    radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
+    refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
+    replay: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+    "search-active": '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+    share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
+    subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
+    "subs-active": '<rect width="18" height="12" x="3" y="4" rx="2" fill="currentColor" stroke="none"/><path d="m10 8 5 2-5 2Z" fill="#050505" stroke="none"/><path d="M8 20h8"/>',
+    thumb: '<path d="M7 10v12"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.8a2 2 0 0 0 1.8-1.1L12 2a3.1 3.1 0 0 1 3 3.9Z"/>',
+    "thumb-filled": '<path d="M7 10v12H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" fill="currentColor" stroke="none"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H9V9.5L12 2a3.1 3.1 0 0 1 3 3.9Z" fill="currentColor" stroke="none"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    "user-active": '<circle cx="12" cy="8" r="4" fill="currentColor" stroke="none"/><path d="M4 21a8 8 0 0 1 16 0Z" fill="currentColor" stroke="none"/>',
+  });
+  const path = icons[name] || icons.more;
+  return `<svg class="ui-icon ui-icon-${escapeHtml(name)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
 }
 
 function mountPlayer(autoplay) {
@@ -4840,10 +4871,10 @@ function handleSheet(sheet, videoId) {
   const video = videoId ? findVideo(videoId) : currentVideo();
   if (sheet === "row-more" || sheet === "video-more") {
     openSheet(video.title, "Choose where to continue this video.", [
-      { label: state.savedIds.has(video.id) ? "Remove saved" : "Save", action: () => { toggleSaved(video.id); closeSheet(); } },
-      { label: "Open channel", action: () => { closeSheet(); openChannel(video.channelId); } },
-      { label: "Open in YouTube", href: `${WATCH_BASE}?v=${encodeURIComponent(video.id)}` },
-      { label: "Close", action: closeSheet },
+      { label: state.savedIds.has(video.id) ? "Remove saved" : "Save", icon: state.savedIds.has(video.id) ? "bookmark-filled" : "bookmark", action: () => { toggleSaved(video.id); closeSheet(); } },
+      { label: "Open channel", icon: "user", action: () => { closeSheet(); openChannel(video.channelId); } },
+      { label: "Open in YouTube", icon: "external", href: `${WATCH_BASE}?v=${encodeURIComponent(video.id)}` },
+      { label: "Close", icon: "close", action: closeSheet },
     ]);
   }
 }
