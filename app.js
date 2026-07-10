@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-fyp-folders-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-fyp-refresh-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -1986,6 +1986,9 @@ function loadPersonalHomeFeed(options = {}) {
           state.homeFeedAbortController = null;
         }
         scheduleBootStabilityCheck(2000);
+        if (state.view === "home") {
+          render();
+        }
       }
     });
 
@@ -4408,7 +4411,7 @@ function renderHome() {
         ${filterChip("today", "New")}
         ${filterChip("saved", "Saved")}
         <button class="home-refresh-button" type="button" data-action="refresh-home" aria-label="Refresh For you" title="Refresh For you"${pendingButtonAttributes(state.homeFeedStatus === "refreshing" || state.homeFeedLoadPromise)}>
-          ${icon("refresh")}
+          ${icon("refreshHome")}
         </button>
       </div>
       ${state.homeFilter === "saved" ? renderSavedFolderRail() : ""}
@@ -5208,6 +5211,7 @@ function icon(name) {
     podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
     radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
     refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
+    refreshHome: '<path d="M20 12a8 8 0 1 1-2.35-5.65"/><path d="M20 4v6h-6"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',

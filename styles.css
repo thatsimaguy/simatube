@@ -775,37 +775,42 @@ label:focus-visible {
 
 .home-refresh-button {
   width: 38px;
-  height: 34px;
+  height: 38px;
   margin-left: auto;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(255, 255, 255, .08);
-  background: #141414;
-  color: var(--text);
+  border-radius: 50%;
+  border: 1px solid rgba(255, 0, 51, .24);
+  background:
+    radial-gradient(circle at 50% 40%, rgba(255, 0, 51, .18), rgba(255, 0, 51, .06) 46%, rgba(255, 255, 255, .055) 47%),
+    #141414;
+  color: #fff;
   cursor: pointer;
-  transition: transform var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .04);
+  transition: transform var(--motion-fast), background var(--motion-fast), border-color var(--motion-fast), box-shadow var(--motion-fast);
 }
 
 .home-refresh-button svg {
-  width: 19px;
-  height: 19px;
+  width: 20px;
+  height: 20px;
+  stroke-width: 2.35;
 }
 
 .home-refresh-button:hover,
 .home-refresh-button:focus-visible {
-  background: #202020;
-  border-color: rgba(255, 255, 255, .16);
+  border-color: rgba(255, 0, 51, .48);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06), 0 0 18px rgba(255, 0, 51, .16);
 }
 
 .home-refresh-button:active {
-  transform: scale(.94) rotate(16deg);
+  transform: scale(.92) rotate(20deg);
 }
 
 .home-refresh-button[disabled],
 .home-refresh-button[aria-busy="true"] {
-  color: #8b8b8b;
+  color: #fff;
+  opacity: .78;
 }
 
 .home-refresh-button[aria-busy="true"] svg {
