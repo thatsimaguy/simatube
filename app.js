@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-comments-auto-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-home-launch-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -123,6 +123,7 @@ let progressSyncTimer = 0;
 let portraitLockTimer = 0;
 let portraitLockPromise = null;
 let lastPortraitLockAttempt = 0;
+let appHiddenAt = 0;
 const storedSavedVideos = readArray("yt_saved_videos")
   .map(compactStoredVideo)
   .filter((video) => video?.id)
@@ -132,7 +133,7 @@ const storedSavedIds = readArray("yt_saved_ids")
   .slice(0, MAX_SAVED_VIDEOS);
 
 const state = {
-  view: recoveringFromFastReload ? "home" : sanitizeView(readJson("yt_last_view", "home")),
+  view: "home",
   auth: {
     accessToken: "",
     scopes: new Set(),
@@ -237,6 +238,7 @@ state.config = normalizeConfig(window.YT_APP_CONFIG || {});
 boot();
 clearOldServiceWorkers();
 window.addEventListener("pagehide", (event) => {
+  appHiddenAt = Date.now();
   clearPlayerFullscreenControlsTimer();
   updateProgressFromPlayer({ save: true });
   stopProgressSync();
@@ -254,8 +256,21 @@ window.addEventListener("pagehide", (event) => {
   destroyPlayer();
 });
 window.addEventListener("pageshow", (event) => {
+  if (event.persisted && returnHomeOnAppResume()) {
+    return;
+  }
   if (event.persisted && state.view === "watch") {
     mountPlayer(false);
+  }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    appHiddenAt = Date.now();
+    return;
+  }
+
+  if (isHomeScreenMode() && appHiddenAt && Date.now() - appHiddenAt > 1000) {
+    returnHomeOnAppResume();
   }
 });
 
@@ -309,6 +324,7 @@ function boot() {
   state.queue = state.homeFeed;
   initializeNavigationHistory();
   clearAuthResultFromUrl();
+  writeJson("yt_last_view", "home");
   render();
   window.requestAnimationFrame(resetScroll);
   setupInfiniteVideoScroll();
@@ -3647,6 +3663,49 @@ function installCopy() {
 
 function isHomeScreenMode() {
   return Boolean(window.matchMedia?.("(display-mode: standalone)")?.matches || navigator.standalone);
+}
+
+function returnHomeOnAppResume() {
+  appHiddenAt = 0;
+  if (!isHomeScreenMode() || state.view === "home") {
+    return false;
+  }
+
+  closeSheet({ restoreFocus: false });
+  if (state.view === "watch") {
+    updateProgressFromPlayer({ save: true });
+    stopProgressSync();
+    state.commentsLoadVersion += 1;
+    cancelCommentsAutoload();
+    cancelCommentsRequest();
+  }
+  if (state.view === "search") {
+    state.searchLoadVersion += 1;
+    cancelSearchRequest();
+  }
+  if (state.view === "channel") {
+    state.channelLoadVersion += 1;
+    cancelChannelRequest();
+    state.channelLoading = false;
+    state.channelLoadingId = "";
+  }
+  cancelPendingPlayerApiLoad();
+  closePlayerFullscreen();
+  destroyPlayer();
+  state.pendingAutoplayVideoId = "";
+  state.view = "home";
+  state.error = "";
+  state.loading = "";
+  writeJson("yt_last_view", "home");
+  updateNavigationHistory({ replaceHistory: true });
+  render();
+  resetScroll();
+  if (state.auth.accessToken) {
+    scheduleHomeFeedEnrichment();
+  } else if (hasApiAccess()) {
+    loadPopularHome();
+  }
+  return true;
 }
 
 function shouldShowOnboarding() {
