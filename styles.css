@@ -2187,11 +2187,6 @@ html.player-fullscreen-controls-hidden .player-shell.app-fullscreen::after {
   content: none;
 }
 
-.nav-item.active svg {
-  width: 24px;
-  height: 24px;
-}
-
 .nav-item:focus-visible {
   outline-offset: -2px;
 }

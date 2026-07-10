@@ -20,7 +20,7 @@ const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 7000;
 const AUTOPLAY_SOUND_RESTORE_DELAY_MS = 1800;
 const AUTOPLAY_MAX_SOUND_ATTEMPTS = 3;
-const CACHE_CLEANUP_VERSION = "2026-07-autoplay-v2";
+const CACHE_CLEANUP_VERSION = "2026-07-nav-icons-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -4547,12 +4547,9 @@ function navButton(view, label, iconName) {
   const isActive = state.view === view;
   const active = isActive ? " active" : "";
   const current = isActive ? ` aria-current="page"` : "";
-  const activeIconName = isActive && ["home", "search", "subs", "user"].includes(iconName)
-    ? `${iconName}-active`
-    : iconName;
   return `
     <button class="nav-item${active}" type="button" data-action="view" data-view="${escapeHtml(view)}" aria-label="${escapeHtml(label)}"${current}>
-      ${icon(activeIconName)}
+      ${icon(iconName)}
       <span>${escapeHtml(label)}</span>
     </button>
   `;
@@ -4575,7 +4572,6 @@ function icon(name) {
     gamepad: '<path d="M6 11h4"/><path d="M8 9v4"/><path d="M15 12h.01"/><path d="M18 10h.01"/><path d="M17.32 5H6.68a4 4 0 0 0-3.86 3l-1.1 4.4A5 5 0 0 0 6.57 18H7l2-2h6l2 2h.43a5 5 0 0 0 4.85-5.6L21.18 8a4 4 0 0 0-3.86-3Z"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
     home: '<path d="m3 10 9-7 9 7"/><path d="M5 9v11h14V9"/><path d="M9 20v-6h6v6"/>',
-    "home-active": '<path d="M3 10.8 12 3l9 7.8V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" fill="currentColor" stroke="none"/>',
     message: '<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/>',
     more: '<circle cx="12" cy="5" r="1.25" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.25" fill="currentColor" stroke="none"/>',
     music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
@@ -4587,14 +4583,11 @@ function icon(name) {
     refresh: '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.7-2.6L20 8M4 16l2.2 1.6A7 7 0 0 0 17.9 15"/>',
     replay: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
-    "search-active": '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
-    "subs-active": '<rect width="18" height="12" x="3" y="4" rx="2" fill="currentColor" stroke="none"/><path d="m10 8 5 2-5 2Z" fill="#050505" stroke="none"/><path d="M8 20h8"/>',
     thumb: '<path d="M7 10v12"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.8a2 2 0 0 0 1.8-1.1L12 2a3.1 3.1 0 0 1 3 3.9Z"/>',
     "thumb-filled": '<path d="M7 10v12H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" fill="currentColor" stroke="none"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H9V9.5L12 2a3.1 3.1 0 0 1 3 3.9Z" fill="currentColor" stroke="none"/>',
     user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
-    "user-active": '<circle cx="12" cy="8" r="4" fill="currentColor" stroke="none"/><path d="M4 21a8 8 0 0 1 16 0Z" fill="currentColor" stroke="none"/>',
   });
   const path = icons[name] || icons.more;
   return `<svg class="ui-icon ui-icon-${escapeHtml(name)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
