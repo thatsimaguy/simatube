@@ -18,13 +18,10 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-refresh-icon-clean-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-comments-wrap-no-folders-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
-const SAVED_FOLDERS_KEY = "yt_saved_folders_v1";
-const ACTIVE_SAVED_FOLDER_KEY = "yt_active_saved_folder_id";
-const DEFAULT_SAVED_FOLDER_ID = "all";
 const PERSONAL_CACHE_FRESH_MS = 30 * 60 * 1000;
 const PERSONAL_CACHE_MAX_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const INITIAL_VIDEO_ROWS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
@@ -36,7 +33,6 @@ const MAX_CHANNEL_VIDEO_CACHES = 12;
 const MAX_SEARCH_CACHE_ENTRIES = 8;
 const MAX_COMMENTS_CACHE_ENTRIES = 6;
 const MAX_SAVED_VIDEOS = 50;
-const MAX_SAVED_FOLDERS = 16;
 const MAX_PROGRESS_ENTRIES = 180;
 const LIBRARY_INITIAL_VIDEO_ROWS = 6;
 const INITIAL_SUBSCRIPTION_CHANNELS = IS_MEMORY_CONSTRAINED_MOBILE ? 7 : 10;
@@ -135,15 +131,6 @@ const storedSavedVideos = readArray("yt_saved_videos")
 const storedSavedIds = readArray("yt_saved_ids")
   .filter((id) => typeof id === "string")
   .slice(0, MAX_SAVED_VIDEOS);
-const storedSavedFolders = normalizeSavedFolders(
-  readArray(SAVED_FOLDERS_KEY),
-  new Set([...storedSavedIds, ...storedSavedVideos.map((video) => video.id)]),
-);
-const storedActiveSavedFolderId = sanitizeActiveSavedFolderId(
-  readString(ACTIVE_SAVED_FOLDER_KEY, DEFAULT_SAVED_FOLDER_ID),
-  storedSavedFolders,
-);
-
 const state = {
   view: "home",
   auth: {
@@ -190,8 +177,6 @@ const state = {
   recentChannels: readArray("yt_recent_channels").map(compactStoredChannel).filter((channel) => channel?.id).slice(0, 12),
   savedIds: new Set([...storedSavedIds, ...storedSavedVideos.map((video) => video.id)]),
   savedVideos: storedSavedVideos,
-  savedFolders: storedSavedFolders,
-  activeSavedFolderId: storedActiveSavedFolderId,
   localHistory: readArray("yt_history").map(compactStoredVideo).filter((video) => video?.id).slice(0, 30),
   watchProgressById: readWatchProgress(),
   searchHistory: readArray("yt_search_history").filter((query) => typeof query === "string").slice(0, 20),
@@ -770,63 +755,6 @@ function sanitizeWatchProgress(value) {
     completed: percent >= COMPLETED_WATCH_PERCENT,
     updatedAt,
   };
-}
-
-function normalizeSavedFolders(value, savedIds = new Set()) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const seen = new Set();
-  return value
-    .map((folder) => {
-      if (!folder || typeof folder !== "object" || Array.isArray(folder)) {
-        return null;
-      }
-      const id = sanitizeSavedFolderId(folder.id);
-      const name = sanitizeSavedFolderName(folder.name);
-      if (!id || !name || id === DEFAULT_SAVED_FOLDER_ID || seen.has(id)) {
-        return null;
-      }
-      seen.add(id);
-      const videoIds = [...new Set((Array.isArray(folder.videoIds) ? folder.videoIds : [])
-        .filter((videoId) => typeof videoId === "string")
-        .filter((videoId) => !savedIds.size || savedIds.has(videoId)))]
-        .slice(0, MAX_SAVED_VIDEOS);
-      return { id, name, videoIds };
-    })
-    .filter(Boolean)
-    .slice(0, MAX_SAVED_FOLDERS);
-}
-
-function sanitizeSavedFolderId(value = "") {
-  return typeof value === "string"
-    ? value.replace(/[^a-z0-9_-]/gi, "").slice(0, 48)
-    : "";
-}
-
-function sanitizeSavedFolderName(value = "") {
-  return String(value)
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 32);
-}
-
-function createSavedFolderId(name) {
-  const slug = sanitizeSavedFolderName(name)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 24) || "folder";
-  return `${slug}-${Date.now().toString(36).slice(-5)}`;
-}
-
-function sanitizeActiveSavedFolderId(folderId, folders = []) {
-  const id = sanitizeSavedFolderId(folderId);
-  if (id === DEFAULT_SAVED_FOLDER_ID || folders.some((folder) => folder.id === id)) {
-    return id || DEFAULT_SAVED_FOLDER_ID;
-  }
-  return DEFAULT_SAVED_FOLDER_ID;
 }
 
 function saveWatchProgress() {
@@ -2833,7 +2761,7 @@ async function loadComments(videoId) {
       signal: controller?.signal,
     });
 
-    const comments = (payload.items || []).map((item) => {
+    const comments = sortCommentsByLikes((payload.items || []).map((item) => {
       const comment = item.snippet?.topLevelComment?.snippet || {};
       return {
         author: comment.authorDisplayName || "YouTube user",
@@ -2842,7 +2770,7 @@ async function loadComments(videoId) {
         likes: Number(comment.likeCount || 0),
         publishedAt: comment.publishedAt || "",
       };
-    });
+    }));
     if (loadVersion !== state.commentsLoadVersion || videoId !== state.activeVideoId) {
       return false;
     }
@@ -3574,41 +3502,16 @@ function savedLibraryVideos() {
   return videos.slice(0, MAX_SAVED_VIDEOS);
 }
 
-function savedFolderVideos(folderId = DEFAULT_SAVED_FOLDER_ID) {
-  if (folderId === DEFAULT_SAVED_FOLDER_ID) {
-    return savedLibraryVideos();
-  }
-  const folder = state.savedFolders.find((item) => item.id === folderId);
-  if (!folder) {
-    return savedLibraryVideos();
-  }
-  const folderIds = new Set(folder.videoIds);
-  return savedLibraryVideos().filter((video) => folderIds.has(video.id));
-}
-
-function persistSavedFolders() {
-  const savedIds = state.savedIds;
-  state.savedFolders = normalizeSavedFolders(state.savedFolders, savedIds);
-  state.activeSavedFolderId = sanitizeActiveSavedFolderId(state.activeSavedFolderId, state.savedFolders);
-  writeJson(SAVED_FOLDERS_KEY, state.savedFolders);
-  writeJson(ACTIVE_SAVED_FOLDER_KEY, state.activeSavedFolderId);
-}
-
 function persistSavedLibrary() {
   state.savedVideos = savedLibraryVideos();
   writeJson("yt_saved_ids", [...state.savedIds]);
   writeJson("yt_saved_videos", state.savedVideos);
-  persistSavedFolders();
 }
 
 function toggleSaved(videoId) {
   if (state.savedIds.has(videoId)) {
     state.savedIds.delete(videoId);
     state.savedVideos = state.savedVideos.filter((video) => video.id !== videoId);
-    state.savedFolders = state.savedFolders.map((folder) => ({
-      ...folder,
-      videoIds: folder.videoIds.filter((id) => id !== videoId),
-    }));
     showToast("Removed from saved.");
   } else {
     state.savedIds.add(videoId);
@@ -3619,119 +3522,11 @@ function toggleSaved(videoId) {
         ...state.savedVideos.filter((item) => item.id !== videoId),
       ].slice(0, MAX_SAVED_VIDEOS);
     }
-    if (state.activeSavedFolderId !== DEFAULT_SAVED_FOLDER_ID) {
-      addVideoToSavedFolder(videoId, state.activeSavedFolderId);
-    }
     showToast("Saved.");
   }
 
   persistSavedLibrary();
   render();
-}
-
-function addVideoToSavedFolder(videoId, folderId) {
-  const folder = state.savedFolders.find((item) => item.id === folderId);
-  if (!folder || !videoId) {
-    return false;
-  }
-  folder.videoIds = [
-    videoId,
-    ...folder.videoIds.filter((id) => id !== videoId),
-  ].slice(0, MAX_SAVED_VIDEOS);
-  return true;
-}
-
-function toggleVideoInSavedFolder(videoId, folderId) {
-  const folder = state.savedFolders.find((item) => item.id === folderId);
-  if (!folder || !videoId) {
-    return false;
-  }
-  if (!state.savedIds.has(videoId)) {
-    state.savedIds.add(videoId);
-    const video = findVideo(videoId);
-    if (video) {
-      state.savedVideos = [
-        compactStoredVideo(video),
-        ...state.savedVideos.filter((item) => item.id !== videoId),
-      ].slice(0, MAX_SAVED_VIDEOS);
-    }
-  }
-  if (folder.videoIds.includes(videoId)) {
-    folder.videoIds = folder.videoIds.filter((id) => id !== videoId);
-    showToast(`Removed from ${folder.name}.`);
-  } else {
-    addVideoToSavedFolder(videoId, folderId);
-    showToast(`Saved to ${folder.name}.`);
-  }
-  persistSavedLibrary();
-  render();
-  return true;
-}
-
-function createSavedFolder(name, videoId = "") {
-  const cleanName = sanitizeSavedFolderName(name);
-  if (!cleanName) {
-    return null;
-  }
-  const existing = state.savedFolders.find((folder) => folder.name.toLowerCase() === cleanName.toLowerCase());
-  const folder = existing || {
-    id: createSavedFolderId(cleanName),
-    name: cleanName,
-    videoIds: [],
-  };
-  if (!existing) {
-    state.savedFolders = [folder, ...state.savedFolders].slice(0, MAX_SAVED_FOLDERS);
-  }
-  state.activeSavedFolderId = folder.id;
-  if (videoId) {
-    if (!state.savedIds.has(videoId)) {
-      state.savedIds.add(videoId);
-      const video = findVideo(videoId);
-      if (video) {
-        state.savedVideos = [
-          compactStoredVideo(video),
-          ...state.savedVideos.filter((item) => item.id !== videoId),
-        ].slice(0, MAX_SAVED_VIDEOS);
-      }
-    }
-    addVideoToSavedFolder(videoId, folder.id);
-  }
-  persistSavedLibrary();
-  showToast(videoId ? `Saved to ${folder.name}.` : `Created ${folder.name}.`);
-  render();
-  return folder;
-}
-
-function promptCreateSavedFolder(videoId = "") {
-  const name = window.prompt("New folder name");
-  if (!name) {
-    return;
-  }
-  createSavedFolder(name, videoId);
-}
-
-function openSavedFolderSheet(videoId = currentVideo().id) {
-  const video = findVideo(videoId);
-  if (!video) {
-    return;
-  }
-  const folderActions = state.savedFolders.map((folder) => {
-    const inFolder = folder.videoIds.includes(video.id);
-    return {
-      label: `${inFolder ? "Remove from" : "Save to"} ${folder.name}`,
-      icon: inFolder ? "check" : "folder",
-      action: () => {
-        toggleVideoInSavedFolder(video.id, folder.id);
-        closeSheet();
-      },
-    };
-  });
-  openSheet(video.title, "Save this video into folders inside SimaTube.", [
-    { label: state.savedIds.has(video.id) ? "Remove saved" : "Save video", icon: state.savedIds.has(video.id) ? "bookmark-filled" : "bookmark", action: () => { toggleSaved(video.id); closeSheet(); } },
-    ...folderActions,
-    { label: "Create folder", icon: "plus", action: () => { closeSheet(); promptCreateSavedFolder(video.id); } },
-    { label: "Close", icon: "close", action: closeSheet },
-  ]);
 }
 
 function setView(view, options = {}) {
@@ -3879,7 +3674,7 @@ function filteredHomeFeed() {
   }
 
   if (state.homeFilter === "saved") {
-    return savedFolderVideos(state.activeSavedFolderId);
+    return savedLibraryVideos();
   }
 
   return state.homeFeed;
@@ -4223,6 +4018,16 @@ function syncPlayerShellChild(retainedShell, nextShell, selector) {
   }
 }
 
+function sortCommentsByLikes(comments = []) {
+  return [...comments].sort((a, b) => {
+    const likeDelta = Number(b.likes || 0) - Number(a.likes || 0);
+    if (likeDelta) {
+      return likeDelta;
+    }
+    return new Date(b.publishedAt || 0).getTime() - new Date(a.publishedAt || 0).getTime();
+  });
+}
+
 function commentLoadErrorMessage(error) {
   const reason = String(error?.reason || "").toLowerCase();
   const message = String(error?.message || "");
@@ -4414,7 +4219,6 @@ function renderHome() {
           ${icon("refreshHome")}
         </button>
       </div>
-      ${state.homeFilter === "saved" ? renderSavedFolderRail() : ""}
       ${renderHomeStatus()}
       ${state.feedLoading ? renderFeedLoader() : renderVideoList(feed, feedSource, emptyMessage)}
     </section>
@@ -4486,28 +4290,6 @@ function renderReconnectPill() {
 function filterChip(value, label) {
   const active = state.homeFilter === value ? " active" : "";
   return `<button class="chip${active}" type="button" data-action="home-filter" data-filter="${escapeHtml(value)}" aria-pressed="${state.homeFilter === value ? "true" : "false"}">${escapeHtml(label)}</button>`;
-}
-
-function renderSavedFolderRail() {
-  const allActive = state.activeSavedFolderId === DEFAULT_SAVED_FOLDER_ID ? " active" : "";
-  const folders = state.savedFolders.map((folder) => {
-    const active = state.activeSavedFolderId === folder.id ? " active" : "";
-    return `
-      <button class="folder-chip${active}" type="button" data-action="saved-folder" data-folder-id="${escapeHtml(folder.id)}" aria-pressed="${active ? "true" : "false"}">
-        ${icon("folder")}<span>${escapeHtml(folder.name)}</span><small>${folder.videoIds.length}</small>
-      </button>
-    `;
-  }).join("");
-
-  return `
-    <div class="folder-row" aria-label="Saved folders">
-      <button class="folder-chip${allActive}" type="button" data-action="saved-folder" data-folder-id="${DEFAULT_SAVED_FOLDER_ID}" aria-pressed="${allActive ? "true" : "false"}">
-        ${icon("bookmark-filled")}<span>All</span><small>${savedLibraryVideos().length}</small>
-      </button>
-      ${folders}
-      <button class="folder-chip create" type="button" data-action="create-saved-folder">${icon("plus")}<span>New folder</span></button>
-    </div>
-  `;
 }
 
 function sanitizeSearchSort(sort) {
@@ -4693,7 +4475,6 @@ function renderWatch() {
         <div class="action-row" aria-label="Video actions">
           ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
           ${actionPill("save", saved ? "Saved" : "Save", saved ? "bookmark-filled" : "bookmark", saved, true)}
-          ${actionPill("folder", "Folder", "folder")}
         </div>
         ${renderDescription(video)}
         <section class="comments-block">
@@ -4742,7 +4523,7 @@ function renderDescription(video) {
 
 function renderComments(videoId) {
   const status = state.commentsStatusByVideoId[videoId] || "idle";
-  const comments = state.commentsByVideoId[videoId] || [];
+  const comments = sortCommentsByLikes(state.commentsByVideoId[videoId] || []);
   const previewLimit = 3;
   const expanded = Boolean(state.commentsExpandedByVideoId[videoId]);
   const visibleComments = expanded ? comments : comments.slice(0, previewLimit);
@@ -4969,7 +4750,7 @@ function renderChannelLoader() {
 
 function renderYou() {
   const profile = state.auth.profile;
-  const visibleSavedVideos = savedFolderVideos(state.activeSavedFolderId);
+  const savedVideos = savedLibraryVideos();
   const likedPending = state.pendingActions.has("liked-videos");
   const likedActionLabel = likedPending ? "Loading" : state.likedVideosLoaded ? "Refresh" : "Load";
   return `
@@ -4992,10 +4773,9 @@ function renderYou() {
       <section class="library-block">
         <div class="section-head">
           <h2>Saved</h2>
-          <button class="text-button" type="button" data-action="create-saved-folder">${icon("plus")}<span>Folder</span></button>
+          <span>${savedVideos.length}</span>
         </div>
-        ${renderSavedFolderRail()}
-        ${renderVideoList(visibleSavedVideos, "saved", "Save a video to keep it here.")}
+        ${renderVideoList(savedVideos, "saved", "Save a video to keep it here.")}
       </section>
       <section class="library-block">
         <div class="section-head">
@@ -5196,7 +4976,6 @@ function icon(name) {
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
     cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
     external: '<path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
-    folder: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 10h18"/>',
     fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
     fullscreenExit: '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M16 3v3a2 2 0 0 0 2 2h3"/><path d="M8 21v-3a2 2 0 0 0-2-2H3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>',
     gamepad: '<path d="M6 11h4"/><path d="M8 9v4"/><path d="M15 12h.01"/><path d="M18 10h.01"/><path d="M17.32 5H6.68a4 4 0 0 0-3.86 3l-1.1 4.4A5 5 0 0 0 6.57 18H7l2-2h6l2 2h.43a5 5 0 0 0 4.85-5.6L21.18 8a4 4 0 0 0-3.86-3Z"/>',
@@ -6068,15 +5847,6 @@ app.addEventListener("click", async (event) => {
     state.visibleRowsBySource[state.homeFilter === "saved" ? "saved" : "home"] = initialRowsForSource(state.homeFilter === "saved" ? "saved" : "home");
     render();
   }
-  if (action === "saved-folder") {
-    state.activeSavedFolderId = sanitizeActiveSavedFolderId(target.dataset.folderId, state.savedFolders);
-    writeJson(ACTIVE_SAVED_FOLDER_KEY, state.activeSavedFolderId);
-    state.visibleRowsBySource.saved = initialRowsForSource("saved");
-    render();
-  }
-  if (action === "create-saved-folder") {
-    promptCreateSavedFolder();
-  }
   if (action === "search-sort") {
     state.searchSort = sanitizeSearchSort(target.dataset.sort);
     render();
@@ -6104,9 +5874,6 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "save") {
     toggleSaved(currentVideo().id);
-  }
-  if (action === "folder") {
-    openSavedFolderSheet(currentVideo().id);
   }
   if (action === "comments") {
     await loadComments(currentVideo().id);
@@ -6237,7 +6004,6 @@ function handleSheet(sheet, videoId) {
     const subscribed = Boolean(state.subscriptionIdsByChannel[video.channelId]);
     openSheet(video.title, "Manage this video inside SimaTube.", [
       { label: state.savedIds.has(video.id) ? "Remove saved" : "Save", icon: state.savedIds.has(video.id) ? "bookmark-filled" : "bookmark", action: () => { toggleSaved(video.id); closeSheet(); } },
-      { label: "Save to folder", icon: "folder", action: () => { closeSheet(); openSavedFolderSheet(video.id); } },
       { label: subscribed ? "Unsubscribe" : "Subscribe", icon: subscribed ? "check" : "plus", action: async () => { closeSheet(); await subscribeToActiveChannel(video.channelId); } },
       { label: "Open channel", icon: "user", action: () => { closeSheet(); openChannel(video.channelId); } },
       { label: "Close", icon: "close", action: closeSheet },
