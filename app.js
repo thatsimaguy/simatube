@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-dislike-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-no-dislike-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -2726,12 +2726,11 @@ async function loadLikedVideos(options = {}) {
   }
 }
 
-async function rateActiveVideo(rating = "like") {
+async function rateActiveVideo() {
   const video = currentVideo();
   if (!video) {
     return;
   }
-  const desiredRating = ["like", "dislike"].includes(rating) ? rating : "like";
 
   const actionKey = `rating:${video.id}`;
   if (!beginPendingAction(actionKey)) {
@@ -2742,7 +2741,7 @@ async function rateActiveVideo(rating = "like") {
   try {
     await ensureWriteAuth();
     const currentRating = state.ratings[video.id] || "none";
-    const nextRating = currentRating === desiredRating ? "none" : desiredRating;
+    const nextRating = currentRating === "like" ? "none" : "like";
     await youtubeFetch("/videos/rate", {
       id: video.id,
       rating: nextRating,
@@ -2750,8 +2749,7 @@ async function rateActiveVideo(rating = "like") {
     state.ratings[video.id] = nextRating;
     const messages = {
       like: "Liked.",
-      dislike: "Disliked.",
-      none: currentRating === "dislike" ? "Dislike removed." : "Like removed.",
+      none: "Like removed.",
     };
     showToast(messages[nextRating] || "Rating updated.");
   } catch (error) {
@@ -4302,7 +4300,6 @@ function renderWatch() {
   const video = currentVideo();
   const subscribed = Boolean(state.subscriptionIdsByChannel[video.channelId]);
   const liked = state.ratings[video.id] === "like";
-  const disliked = state.ratings[video.id] === "dislike";
   const saved = state.savedIds.has(video.id);
   const commentsStatus = state.commentsStatusByVideoId[video.id] || "idle";
   const commentsActionLabel = {
@@ -4359,7 +4356,6 @@ function renderWatch() {
         </div>
         <div class="action-row" aria-label="Video actions">
           ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
-          ${actionPill("dislike", disliked ? "Disliked" : "Dislike", disliked ? "thumb-down-filled" : "thumb-down", disliked, true)}
           ${actionPill("replay", "Replay", "replay")}
           ${actionPill("save", saved ? "Saved" : "Save", saved ? "bookmark-filled" : "bookmark", saved, true)}
           ${actionPill("share", "Share", "share")}
@@ -4386,7 +4382,7 @@ function renderWatch() {
 
 function actionPill(action, label, iconName, active = false, toggle = false) {
   const pressed = toggle ? ` aria-pressed="${active ? "true" : "false"}"` : "";
-  const pending = ["like", "dislike"].includes(action) && state.pendingActions.has(`rating:${currentVideo()?.id}`);
+  const pending = action === "like" && state.pendingActions.has(`rating:${currentVideo()?.id}`);
   return `<button class="action-pill${active ? " active" : ""}" type="button" data-action="${escapeHtml(action)}"${pressed}${pendingButtonAttributes(pending)}>${icon(iconName)}<span>${escapeHtml(label)}</span></button>`;
 }
 
@@ -4873,8 +4869,6 @@ function icon(name) {
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>',
     subs: '<rect width="18" height="12" x="3" y="4" rx="2"/><path d="m10 8 5 2-5 2Z"/><path d="M8 20h8"/>',
     thumb: '<path d="M7 10v12"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.8a2 2 0 0 0 1.8-1.1L12 2a3.1 3.1 0 0 1 3 3.9Z"/>',
-    "thumb-down": '<path d="M17 14V2"/><path d="m9 18.1 1-4.1H4.2a2 2 0 0 1-1.9-2.6l2.3-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.8a2 2 0 0 0-1.8 1.1L12 22a3.1 3.1 0 0 1-3-3.9Z"/>',
-    "thumb-down-filled": '<path d="M17 14V2h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2Z" fill="currentColor" stroke="none"/><path d="m9 18.1 1-4.1H4.2a2 2 0 0 1-1.9-2.6l2.3-8A2 2 0 0 1 6.5 2H15v4.5L12 22a3.1 3.1 0 0 1-3-3.9Z" fill="currentColor" stroke="none"/>',
     "thumb-filled": '<path d="M7 10v12H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" fill="currentColor" stroke="none"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 8A2 2 0 0 1 17.5 22H9V9.5L12 2a3.1 3.1 0 0 1 3 3.9Z" fill="currentColor" stroke="none"/>',
     user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
     volume: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/>',
@@ -5716,10 +5710,7 @@ app.addEventListener("click", async (event) => {
     nextVideo({ autoplay: true, preserveFullscreen: true });
   }
   if (action === "like") {
-    await rateActiveVideo("like");
-  }
-  if (action === "dislike") {
-    await rateActiveVideo("dislike");
+    await rateActiveVideo();
   }
   if (action === "subscribe") {
     await subscribeToActiveChannel();
