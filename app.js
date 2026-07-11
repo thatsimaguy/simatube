@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 const PLAYER_API_TIMEOUT_MS = 12000;
 const GOOGLE_IDENTITY_TIMEOUT_MS = 10000;
 const AUTOPLAY_RECOVERY_MS = 3600;
-const CACHE_CLEANUP_VERSION = "2026-07-fullscreen-music-mode-v1";
+const CACHE_CLEANUP_VERSION = "2026-07-picture-in-picture-v1";
 const PERSONAL_CACHE_KEY = "yt_personal_cache_v1";
 const PERSONAL_CACHE_VERSION = 2;
 const WATCH_PROGRESS_KEY = "yt_watch_progress_v1";
@@ -185,6 +185,8 @@ const state = {
   fullscreenControlsTimer: 0,
   fullscreenExitTimer: 0,
   fullscreenControlsHidden: false,
+  pictureInPictureWindow: null,
+  pictureInPictureMountPlaceholder: null,
   installIntroDone: readBoolean("yt_install_intro_done", false),
   rememberSignIn: readBoolean("yt_remember_youtube_signin", false),
   reconnectFailed: false,
@@ -3608,6 +3610,7 @@ function setView(view, options = {}) {
     state.channelLoadingId = "";
   }
   if (view !== "watch") {
+    closePictureInPicture();
     state.pendingAutoplayVideoId = "";
     cancelPendingPlayerApiLoad();
     closePlayerFullscreen();
@@ -4548,6 +4551,7 @@ function renderWatch() {
         </div>
         <div class="action-row" aria-label="Video actions">
           ${actionPill("like", liked ? "Liked" : (video.likeCount || "Like"), liked ? "thumb-filled" : "thumb", liked, true)}
+          ${actionPill("picture-in-picture", "PiP", "picture-in-picture", Boolean(state.pictureInPictureWindow), true)}
           ${actionPill("music-mode", state.musicMode ? "Music on" : "Music", "music", state.musicMode, true)}
           ${actionPill("save", saved ? "Saved" : "Save", saved ? "bookmark-filled" : "bookmark", saved, true)}
         </div>
@@ -5086,6 +5090,7 @@ function icon(name) {
     music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
     newspaper: '<path d="M4 22h16a2 2 0 0 0 2-2V4H8v16a2 2 0 0 1-4 0V6H2v14a2 2 0 0 0 2 2Z"/><path d="M12 8h6M12 12h6M12 16h6"/>',
     play: '<path d="m7 4 13 8-13 8Z" fill="currentColor" stroke="none"/>',
+    "picture-in-picture": '<rect x="3" y="5" width="18" height="14" rx="2"/><rect x="11" y="11" width="8" height="6" rx="1" fill="currentColor" stroke="none"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     podcast: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2"/><path d="m10 18-1 4h6l-1-4"/>',
     radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
@@ -5521,6 +5526,7 @@ function updateProgressDom(videoId, percent) {
 }
 
 function destroyPlayer() {
+  closePictureInPicture();
   updateProgressFromPlayer({ save: true });
   stopProgressSync();
   const player = state.player;
@@ -5559,6 +5565,96 @@ async function togglePlayerFullscreen(triggerButton = null) {
     return;
   }
   restorePlayerFullscreen();
+}
+
+function pictureInPictureSupported() {
+  return Boolean(window.documentPictureInPicture?.requestWindow);
+}
+
+function setPictureInPictureButtonState(active) {
+  document.querySelectorAll('[data-action="picture-in-picture"]').forEach((button) => {
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.setAttribute("aria-label", active ? "Close Picture in Picture" : "Open Picture in Picture");
+    button.querySelector("span:last-child")?.replaceChildren(active ? "Close PiP" : "PiP");
+  });
+}
+
+function restorePictureInPicturePlayer() {
+  const placeholder = state.pictureInPictureMountPlaceholder;
+  const pipWindow = state.pictureInPictureWindow;
+  const mount = pipWindow?.document?.querySelector?.("#playerMount");
+  if (mount && placeholder?.isConnected) {
+    placeholder.replaceWith(mount);
+  }
+  state.pictureInPictureMountPlaceholder = null;
+  state.pictureInPictureWindow = null;
+  setPictureInPictureButtonState(false);
+}
+
+function closePictureInPicture() {
+  const pipWindow = state.pictureInPictureWindow;
+  if (!pipWindow) {
+    return;
+  }
+  restorePictureInPicturePlayer();
+  try {
+    pipWindow.close();
+  } catch {
+    // The browser may already be closing the PiP window.
+  }
+}
+
+async function togglePictureInPicture() {
+  if (state.pictureInPictureWindow) {
+    closePictureInPicture();
+    return;
+  }
+  if (!state.playerReady || !state.player?.getIframe?.()) {
+    showToast("Start the video first, then tap PiP.");
+    return;
+  }
+  if (!pictureInPictureSupported()) {
+    showToast("On iPhone, tap the video, then use the player's Picture in Picture control.");
+    return;
+  }
+
+  const mount = document.querySelector("#playerMount");
+  if (!mount) {
+    showToast("Picture in Picture is not ready yet.");
+    return;
+  }
+
+  try {
+    const pipWindow = await window.documentPictureInPicture.requestWindow({ width: 480, height: 270 });
+    const placeholder = document.createElement("div");
+    placeholder.className = "picture-in-picture-placeholder";
+    mount.replaceWith(placeholder);
+    state.pictureInPictureWindow = pipWindow;
+    state.pictureInPictureMountPlaceholder = placeholder;
+
+    const style = pipWindow.document.createElement("style");
+    style.textContent = `
+      * { box-sizing: border-box; }
+      html, body, #playerMount, #playerMount iframe { width: 100%; height: 100%; margin: 0; background: #000; overflow: hidden; }
+      #playerMount iframe { display: block; border: 0; }
+      button { position: fixed; top: 10px; right: 10px; z-index: 10; width: 36px; height: 36px; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; background: rgba(0,0,0,.72); color: #fff; font: 700 20px/1 system-ui; cursor: pointer; }
+    `;
+    const closeButton = pipWindow.document.createElement("button");
+    closeButton.type = "button";
+    closeButton.textContent = "\u00d7";
+    closeButton.setAttribute("aria-label", "Close Picture in Picture");
+    closeButton.addEventListener("click", closePictureInPicture);
+    pipWindow.document.head.append(style);
+    pipWindow.document.body.append(mount, closeButton);
+    pipWindow.addEventListener("pagehide", restorePictureInPicturePlayer, { once: true });
+    setPictureInPictureButtonState(true);
+  } catch (error) {
+    restorePictureInPicturePlayer();
+    if (error?.name !== "AbortError") {
+      showToast("Picture in Picture could not open in this browser.");
+    }
+  }
 }
 
 function isPlayerFullscreen() {
@@ -5962,6 +6058,9 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "player-fullscreen") {
     await togglePlayerFullscreen(target);
+  }
+  if (action === "picture-in-picture") {
+    await togglePictureInPicture();
   }
   if (action === "next-video") {
     nextVideo({ autoplay: true, preserveFullscreen: true });
